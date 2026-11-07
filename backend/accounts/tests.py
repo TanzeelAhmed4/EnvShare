@@ -6,6 +6,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.db import IntegrityError, transaction
 from argon2.low_level import Type
 from rest_framework.test import APIClient
+from unittest.mock import patch
 
 
 class ProjectSetupTests(SimpleTestCase):
@@ -25,6 +26,10 @@ class ProjectSetupTests(SimpleTestCase):
             'django.contrib.auth.hashers.Argon2PasswordHasher',
         )
         self.assertEqual(get_hasher('argon2').params().type, Type.ID)
+
+    def test_registration_throttle_has_separate_five_per_hour_rate(self):
+        self.assertEqual(settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['registration'], '5/hour')
+        self.assertEqual(settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'], '5/minute')
 
     def test_local_development_security_defaults_remain_usable(self):
         self.assertFalse(settings.SESSION_COOKIE_SECURE)
@@ -87,6 +92,10 @@ class AuthenticationApiTests(TestCase):
 
     def setUp(self):
         self.client = APIClient(enforce_csrf_checks=True)
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
 
     def csrf_post(self, path, data=None):
         csrf_response = self.client.get('/api/auth/csrf/', HTTP_HOST='localhost')
@@ -164,6 +173,111 @@ class AuthenticationApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('email', response.json())
         self.assertIn('password', response.json())
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '5/minute', 'registration': '2/minute'},
+    })
+    def test_registration_throttle_allows_requests_within_limit(self):
+        with patch('accounts.auth_views.RegistrationAttemptThrottle.THROTTLE_RATES', {
+            'login': '5/minute', 'registration': '2/minute',
+        }):
+            first = self.register(username='first-user', email='first@example.com')
+            second = self.register(username='second-user', email='second@example.com')
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '5/minute', 'registration': '2/minute'},
+    })
+    def test_registration_throttle_returns_429_without_creating_throttled_user(self):
+        with patch('accounts.auth_views.RegistrationAttemptThrottle.THROTTLE_RATES', {
+            'login': '5/minute', 'registration': '2/minute',
+        }):
+            self.assertEqual(self.register('first-user', 'first@example.com').status_code, 201)
+            self.assertEqual(self.register('second-user', 'second@example.com').status_code, 201)
+
+            limited = self.register('third-user', 'third@example.com')
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertFalse(get_user_model().objects.filter(username='third-user').exists())
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '5/minute', 'registration': '1/hour'},
+    })
+    def test_registration_throttle_does_not_limit_login_or_unrelated_endpoints(self):
+        with patch('accounts.auth_views.RegistrationAttemptThrottle.THROTTLE_RATES', {
+            'login': '5/minute', 'registration': '1/hour',
+        }):
+            self.assertEqual(self.register('registered-user', 'registered@example.com').status_code, 201)
+            self.assertEqual(self.register('blocked-user', 'blocked@example.com').status_code, 429)
+
+        get_user_model().objects.create_user(
+            username='existing-user', email='existing@example.com', password=self.valid_password,
+        )
+        login_response = self.csrf_post('/api/auth/login/', {
+            'username': 'existing-user', 'password': self.valid_password,
+        })
+        api_root = self.client.get('/api/', HTTP_HOST='localhost')
+
+        self.assertEqual(login_response.status_code, 200)
+        self.assertEqual(api_root.status_code, 200)
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '5/minute', 'registration': '1/hour'},
+    })
+    def test_registration_throttle_preserves_csrf_protection(self):
+        response = self.client.post(
+            '/api/auth/register/',
+            {'username': 'csrf-blocked', 'email': 'csrf@example.com', 'password': self.valid_password},
+            format='json',
+            HTTP_HOST='localhost',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(get_user_model().objects.filter(username='csrf-blocked').exists())
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '5/minute', 'registration': '1/hour'},
+    })
+    def test_registration_error_responses_do_not_echo_password_or_sensitive_input(self):
+        password_marker = 'private-registration-password-marker'
+        sensitive_marker = 'private-registration-input-marker'
+        with patch('accounts.auth_views.RegistrationAttemptThrottle.THROTTLE_RATES', {
+            'login': '5/minute', 'registration': '1/hour',
+        }):
+            invalid = self.csrf_post('/api/auth/register/', {
+                'username': 'invalid-user',
+                'email': f'{sensitive_marker}-not-an-email',
+                'password': password_marker,
+            })
+            limited = self.csrf_post('/api/auth/register/', {
+                'username': 'limited-user',
+                'email': 'limited@example.com',
+                'password': password_marker,
+            })
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(limited.status_code, 429)
+        for response in (invalid, limited):
+            body = response.content.decode()
+            self.assertNotIn(password_marker, body)
+            self.assertNotIn(sensitive_marker, body)
 
     def test_login_sets_session_and_invalid_credentials_are_rejected(self):
         user = get_user_model().objects.create_user(

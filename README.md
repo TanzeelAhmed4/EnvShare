@@ -14,7 +14,7 @@ EnvShare is a local course project for sharing and managing environment variable
 - Sensitive values stored using AES-256-GCM encryption, masked in ordinary API responses, and revealed through a separate authorized operation.
 - `.env` parsing and preview with New, Update (old/new), and Unchanged classifications; confirmation is required before writes. Existing sensitivity is preserved on update, and new variables require a classification.
 - Audit records for variable creation, update, deletion, and import changes, with actor and timestamp. Sensitive plaintext is redacted.
-- Production configuration validation and security settings, login throttling, normalized username/email uniqueness constraints, stale import-preview rejection, and frontend session-expiry handling.
+- Production configuration validation and security settings, login throttling, registration throttling (five attempts per client IP per hour), normalized username/email uniqueness constraints, stale import-preview rejection, and frontend session-expiry handling.
 
 ## Architecture
 
@@ -75,7 +75,7 @@ Frontend versions are recorded in `frontend/package-lock.json`: React 18, React 
 
 Use the exact PowerShell setup and startup commands in [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md). In short, configure the backend environment, install Python and npm dependencies, apply migrations, then run Django on port 8000 and Vite on port 5173. Open `http://localhost:5173`.
 
-Previously reported Phase 7 verification included 59 passing backend tests, successful Django checks, no migration drift, a clean `pip check`, five frontend session assertions, TypeScript checks, a successful Vite production build, and zero npm audit findings. During the current documentation inspection, I reran safe checks only: Django `check`, migration dry-run, `pip check`, the five frontend assertions, and TypeScript no-emit validation; these all passed. Backend test suite and frontend build were not rerun during this documentation pass.
+Previously reported Phase 7 verification included 59 passing backend tests, successful Django checks, no migration drift, a clean `pip check`, five frontend session assertions, TypeScript checks, a successful Vite production build, and zero npm audit findings. For registration throttling, the full backend suite passed all 65 tests and Django `check` passed. Frontend checks were not rerun because no frontend files changed.
 
 ## Known limitations and risks
 

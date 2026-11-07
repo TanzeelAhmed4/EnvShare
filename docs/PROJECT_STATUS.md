@@ -4,6 +4,8 @@
 
 Phases 1–7 are implemented. EnvShare has its local Django REST Framework backend, React client, SQLite database, session authentication, project sharing, environment variables, encrypted sensitive values, import preview/confirmation, and audit history. The application has not been deployed and is not declared production-ready.
 
+Registration attempts are throttled separately from login: five attempts per client IP per hour. Login remains limited to five attempts per minute.
+
 The original course PDF is the functional authority. Its requirements are preserved: authentication; projects and registered-user sharing; Development, Staging, and Production environments; Standard/Sensitive key-value variables; encryption and authorized reveal; `.env` parsing and a New/Update/Unchanged preview before save; audit records for additions, changes, and deletions; accessible history; secure password handling; clear errors; and consistent UI.
 
 ## Phase record
@@ -24,6 +26,8 @@ The original course PDF is the functional authority. Its requirements are preser
 **Previously reported for Phase 7:** 59 backend tests passed; Django system checks passed; migration consistency check reported no changes; `pip check` was clean; frontend session assertions, TypeScript check, and Vite build passed; npm audit reported zero vulnerabilities. A production-mode deployment check had two warnings because HSTS subdomain coverage and preload were intentionally disabled pending domain review. Browser end-to-end tests were not configured.
 
 **Rerun during this documentation inspection:** Django `check` passed with no issues; `makemigrations --check --dry-run` reported no changes; `pip check` found no broken requirements; five frontend session assertions passed; TypeScript `--noEmit --incremental false` passed. All listed accounts and projects migrations were shown as applied. The full backend suite and frontend production build were not rerun in this documentation-only pass.
+
+**Registration throttle change:** all 65 backend tests passed, including six new regression tests for configured rates, allowed requests, 429 behavior without user creation, isolation from login/unrelated endpoints, CSRF enforcement, and sensitive-input redaction. Django `check` passed. No migration was added or applied.
 
 No database migration or write, dependency installation, build, deployment, or secret/key operation was performed during this documentation pass.
 

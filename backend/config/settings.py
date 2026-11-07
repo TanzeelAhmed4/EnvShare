@@ -198,5 +198,6 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'login': '5/minute',
+        'registration': '5/hour',
     },
 }

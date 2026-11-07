@@ -24,6 +24,16 @@ class LoginAttemptThrottle(SimpleRateThrottle):
         }
 
 
+class RegistrationAttemptThrottle(SimpleRateThrottle):
+    scope = 'registration'
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {
+            'scope': self.scope,
+            'ident': self.get_ident(request),
+        }
+
+
 def csrf_failure(request, reason=''):
     return JsonResponse(
         {'detail': 'CSRF verification failed. Refresh the page and try again.'},
@@ -44,6 +54,7 @@ class CsrfTokenView(APIView):
 class RegistrationView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [RegistrationAttemptThrottle]
 
     def post(self, request):
         serializer = RegistrationSerializer(data=request.data)
