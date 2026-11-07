@@ -1,0 +1,39 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local databases
+*.sqlite3
+*.db
+
+# Frontend dependencies and builds
+node_modules/
+dist/
+
+# Local and generated files
+.DS_Store
+Thumbs.db
+*.log
+
+# Django and test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Private key and certificate files
+*.pem
+*.key
+*.p12
+*.pfx
