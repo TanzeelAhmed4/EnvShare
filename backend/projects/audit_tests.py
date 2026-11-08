@@ -31,6 +31,9 @@ class EnvironmentVariableAuditTests(TestCase):
     def audit_url(self):
         return f'/api/projects/{self.project.pk}/audit/'
 
+    def reveal_url(self, variable):
+        return f'{self.variables_url()}{variable.pk}/reveal/'
+
     def create_variable(self, key='TOKEN_NAME', value='plain-before', sensitivity='standard', user=None):
         self.client.force_authenticate(user=user or self.owner)
         response = self.client.post(
@@ -106,6 +109,98 @@ class EnvironmentVariableAuditTests(TestCase):
         self.assertEqual(EnvironmentVariableAuditEvent.objects.count(), 3)
         for event in EnvironmentVariableAuditEvent.objects.all():
             self.assertIn('[REDACTED]', json.dumps(event.changes))
+
+    def test_successful_sensitive_reveal_records_context_without_plaintext(self):
+        secret = 'reveal-audit-secret-marker-73'
+        variable = self.create_variable('PRIVATE_TOKEN', secret, 'sensitive')
+        self.client.force_authenticate(user=self.member)
+
+        response = self.client.post(self.reveal_url(variable), {}, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'key': 'PRIVATE_TOKEN', 'value': secret})
+        events = EnvironmentVariableAuditEvent.objects.filter(
+            action=EnvironmentVariableAuditEvent.Action.REVEALED,
+        )
+        self.assertEqual(events.count(), 1)
+        event = events.get()
+        self.assertEqual(event.actor, self.member)
+        self.assertEqual(event.actor_username, 'audit-member')
+        self.assertEqual(event.project, self.project)
+        self.assertEqual(event.project_name, self.project.name)
+        self.assertEqual(event.environment, self.environment)
+        self.assertEqual(event.environment_name, self.environment.name)
+        self.assertEqual(event.variable_id, variable.pk)
+        self.assertEqual(event.variable_key, 'PRIVATE_TOKEN')
+        self.assertTrue(event.created_at)
+        self.assertEqual(event.changes, {})
+
+        audit_data = json.dumps(event.__dict__, default=str)
+        timeline = self.client.get(self.audit_url())
+        self.assertEqual(timeline.status_code, 200)
+        self.assertIn('revealed', timeline.content.decode())
+        self.assertNotIn(secret, audit_data)
+        self.assertNotIn(secret, timeline.content.decode())
+
+    def test_each_successful_reveal_creates_a_separate_event(self):
+        variable = self.create_variable('REPEATED_TOKEN', 'repeat-secret', 'sensitive')
+        self.client.force_authenticate(user=self.member)
+
+        first = self.client.post(self.reveal_url(variable), {}, format='json')
+        second = self.client.post(self.reveal_url(variable), {}, format='json')
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        events = list(EnvironmentVariableAuditEvent.objects.filter(
+            action=EnvironmentVariableAuditEvent.Action.REVEALED,
+            variable_id=variable.pk,
+        ))
+        self.assertEqual(len(events), 2)
+        self.assertNotEqual(events[0].pk, events[1].pk)
+
+    def test_unauthorized_and_failed_reveals_do_not_create_reveal_events(self):
+        sensitive = self.create_variable('PRIVATE_TOKEN', 'private-secret', 'sensitive')
+        standard = self.create_variable('PUBLIC_VALUE', 'ordinary-value', 'standard')
+
+        self.client.force_authenticate(user=self.outsider)
+        unauthorized = self.client.post(self.reveal_url(sensitive), {}, format='json')
+
+        self.client.force_authenticate(user=self.member)
+        missing = self.client.post(
+            f'{self.variables_url()}999999/reveal/', {}, format='json',
+        )
+        standard_response = self.client.post(self.reveal_url(standard), {}, format='json')
+        EnvironmentVariable.objects.filter(pk=sensitive.pk).update(value='aesgcm:v1:broken')
+        failed_decryption = self.client.post(self.reveal_url(sensitive), {}, format='json')
+
+        self.assertEqual(unauthorized.status_code, 404)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(standard_response.status_code, 400)
+        self.assertEqual(failed_decryption.status_code, 503)
+        self.assertNotIn('private-secret', failed_decryption.content.decode())
+        self.assertFalse(EnvironmentVariableAuditEvent.objects.filter(
+            action=EnvironmentVariableAuditEvent.Action.REVEALED,
+        ).exists())
+
+    def test_audit_recording_failure_does_not_return_decrypted_secret(self):
+        secret = 'never-return-when-audit-fails-81'
+        variable = self.create_variable('FAIL_CLOSED_TOKEN', secret, 'sensitive')
+        client = APIClient(raise_request_exception=False)
+        client.force_authenticate(user=self.member)
+
+        with patch(
+            'projects.environment_views.record_variable_audit',
+            side_effect=RuntimeError('private audit failure detail'),
+        ):
+            response = client.post(self.reveal_url(variable), {}, format='json')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'detail': 'The variable reveal could not be audited.'})
+        self.assertNotIn(secret, response.content.decode())
+        self.assertNotIn('private audit failure detail', response.content.decode())
+        self.assertFalse(EnvironmentVariableAuditEvent.objects.filter(
+            action=EnvironmentVariableAuditEvent.Action.REVEALED,
+        ).exists())
 
     def test_import_creation_and_update_generate_events_with_safe_values(self):
         secret = 'import-audit-secret-value'

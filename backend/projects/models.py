@@ -121,6 +121,7 @@ class EnvironmentVariableAuditEvent(models.Model):
         CREATED = 'created', 'Created'
         UPDATED = 'updated', 'Updated'
         DELETED = 'deleted', 'Deleted'
+        REVEALED = 'revealed', 'Revealed'
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='audit_events')
     environment = models.ForeignKey(

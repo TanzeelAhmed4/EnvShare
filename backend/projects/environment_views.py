@@ -16,7 +16,7 @@ from .audit import _MISSING, record_variable_audit
 from .encryption import EncryptionError, decrypt_value, encrypt_value
 from .env_import import parse_env_content
 from .environment_serializers import EnvironmentSerializer, EnvironmentVariableSerializer
-from .models import Environment, EnvironmentVariable
+from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent
 from .views import visible_projects_for
 
 
@@ -182,6 +182,24 @@ class EnvironmentVariableRevealView(APIView):
             plaintext = decrypt_value(variable.value, environment, variable.key)
         except EncryptionError as error:
             return encryption_error_response(error)
+
+        try:
+            with transaction.atomic():
+                record_variable_audit(
+                    action=EnvironmentVariableAuditEvent.Action.REVEALED,
+                    actor=request.user,
+                    environment=environment,
+                    variable_id=variable.pk,
+                    key=variable.key,
+                    sensitivity=variable.sensitivity,
+                )
+        except Exception:
+            # A reveal is successful only when its audit event is persisted.
+            # Do not include exception details, which could expose data.
+            return Response(
+                {'detail': 'The variable reveal could not be audited.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response({'key': variable.key, 'value': plaintext})
 
 

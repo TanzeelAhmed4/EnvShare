@@ -2,57 +2,39 @@
 
 ## Read this before making changes
 
-**Before changing any file, inspect the current workspace, README, this handoff, relevant implementation, migrations, tests, Git status, and applicable instructions. Report the current state and propose a focused plan when the task requires it. Do not assume an earlier phase is incomplete and recreate it.**
+Before editing, inspect the current workspace, this handoff, README, relevant source, migrations, tests, Git status, and applicable instructions. Preserve the current local database, migration history, custom `accounts.User`, and existing encryption key. Do not reset the database, regenerate/replace the key, expose secrets, or alter unrelated files. Add migrations only when needed and never rewrite an applied migration. Deployment, staging, committing, and pushing require separate explicit authorization.
 
-Preserve the working Phase 1–7 functionality, the custom `accounts.User` model, applied migration history, local database and user data, and the existing encryption key. Never reset/delete the database, regenerate/replace the encryption key, expose secrets, or alter unrelated files. Add migrations safely and only when needed. Do not deploy without explicit approval.
+EnvShare is a local course project, not a production-ready service. The original course requirements remain the product boundary: account sessions; projects and registered-user sharing; Development, Staging, Production; Standard/Sensitive key-value variables; encrypted Sensitive storage and authorized reveal; `.env` preview/confirmation; variable audit history; secure password handling; and a usable frontend.
 
-## Product scope
+## Stack and paths
 
-EnvShare is the course project “Team Environment Variable Manager.” The original two-page course PDF is authoritative. The MVP requirements are:
+- Backend: Django 6.1.3, Django REST Framework 3.18.3, SQLite, accounts and projects apps.
+- Existing Windows backend interpreter: `backend\.venv\Scripts\python.exe` (Django 6.1.3 verified). The root-level `backend.venv` path is absent.
+- Frontend: React 18, TypeScript 5.6, Vite 6.4.5; sources in `frontend/src/`, the current small test in `frontend/tests/`.
+- Read [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md), and [PROJECT_STATUS.md](PROJECT_STATUS.md) before relevant work.
 
-1. User signup and login.
-2. User-created projects.
-3. Project creators invite/add registered users; owners and members view/edit variables; members cannot manage membership.
-4. Development, Staging, and Production environments per project.
-5. Key/value variables classified Standard or Sensitive.
-6. Sensitive values are encrypted at rest, masked in normal UI/API responses, and revealed only through an authorized operation.
-7. Paste `.env` text; ignore blank lines/comments and parse supported key-value syntax.
-8. Preview New, Update (old vs new), and Unchanged before saving; new values can be classified and existing classifications are retained.
-9. Audit additions, changes, and deletions with actor, action, key/context, and time; redact Sensitive plaintext.
-10. Accessible chronological history.
-11. Secure password hashing, clear errors, and consistent UI.
+## Current implementation details
 
-Do not add features that expand the approved course scope without asking.
+Implemented behavior includes session/CSRF authentication, Argon2-preferred password hashing, case-insensitive login and uniqueness constraints, IP and per-normalized-username failed-login protection, owner/member project access, three environments, variable CRUD, AES-GCM Sensitive values, import preview and confirmation, and chronological audit history.
 
-## Stack and layout
+Login limits are 5 requests/IP/minute and 5 failed passwords/normalized username per 15-minute window followed by a 60-second cooldown; registration is 5/IP/hour. The username failure cache key uses an HMAC digest. A successful login clears the failure state. The cooldown can be repeatedly triggered against a known account, creating a temporary denial-of-service risk. Cache is currently local-memory/process-local, not shared between workers.
 
-- Backend: Python, Django, Django REST Framework; SQLite for local course submission.
-- Authentication: Django sessions and CSRF; Argon2 preferred for password hashing.
-- Sensitive values: AES-256-GCM, with key supplied through environment configuration.
-- Frontend: React, TypeScript, Vite, Tailwind CSS.
-- Main paths: `backend/config/`, `backend/accounts/`, `backend/projects/`, `frontend/src/`, `frontend/tests/`, `docs/`.
+Sensitive reveal auditing is implemented in `backend/projects/environment_views.py`: only successful Sensitive reveals write action `revealed`; the audit event stores metadata with empty `changes`, before the API returns plaintext. The plaintext is not passed to the audit helper. Audit-write failure returns a generic 503 and withholds the value. `backend/projects/migrations/0004_reveal_audit_action.py` adds the model action choice after migration 0003. The frontend type includes `revealed`; its successful reveal handler invokes `onAuditChange`, which refreshes `AuditTimeline`; failure does not invoke it.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for boundaries and data flow, [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md) for local commands, and [PROJECT_STATUS.md](PROJECT_STATUS.md) for phase status and checks.
+Case-insensitive login resolves `username__iexact` to the stored username before Django authentication. Username and non-empty email uniqueness use `Lower` constraints. This avoids SQLite-only lookup SQL and is intended to improve PostgreSQL portability, but settings only configure SQLite and PostgreSQL behavior is not verified.
 
-## Implemented state
+## Security and data invariants
 
-Phases 1–6 implement configuration, authentication, projects/memberships, three environments and encrypted variables, `.env` import preview/confirmation, and audit history. Phase 7 added focused security hardening, constraint migration, production configuration validation, login throttling, stale-preview rejection, and session-expiry handling. Phase 8 local browser demonstration/course-submission preparation is the next phase; it has not started. Deployment is out of scope and the application is not certified production-ready.
-
-Backend tests cover authentication/CSRF, project access and roles, variable CRUD and authorization, encryption at rest/masking/reveal, key configuration, import parsing/classifications/confirmation/security, and audit attribution/redaction/permissions/transactions. Frontend tests include five session-response assertions. Browser E2E tests are not configured.
-
-## Data and security invariants
-
-- Preserve `backend/accounts/models.py` and the original `accounts` initial migration. Existing constraints were added in an additive migration.
-- Never output actual `.env` values, passwords, tokens, encryption keys, Sensitive variable plaintext, or private user data. Inspect secret-bearing files only through a value-redacting classifier if necessary.
-- Sensitive values must never appear in ordinary serializers, logs, errors, import tokens/previews, or audit records.
-- Enforce project membership in backend permissions on every project-scoped API. Frontend hiding is not an access control.
-- Keep variable writes and corresponding audit records transactional.
-- Preserve existing migrations and database records. Never use `flush`, delete the SQLite DB, or rewrite migrations as a shortcut.
-- The existing encryption key is required to decrypt current Sensitive values. Do not replace or rotate it; rotation/recovery is not implemented.
-- Do not make dependency upgrades without checking advisories and compatibility first.
+- Never print, copy, or expose `.env` values, passwords, tokens, encryption keys, Sensitive variable plaintext, or private user data. Do not inspect secret-bearing files through ordinary output commands.
+- Never put raw usernames or passwords in login-throttle cache keys. Keep IP request throttling separate from username failure cooldown state.
+- Sensitive plaintext must not enter audit rows, logs, error messages, ordinary serializers, or import previews. Reveal plaintext only after audit persistence succeeds.
+- Enforce project membership in backend views/permissions; frontend hiding is not authorization.
+- Keep variable writes and corresponding audits transactional. Preserve project deletion cascade semantics unless explicitly changed.
+- Preserve the existing encryption key. Rotation/recovery is not implemented.
+- Keep actual `.env`, database, virtual-environment, key, and build artifacts out of source changes.
 
 ## Verification and reporting
 
-Run relevant backend tests and checks, migration consistency checks, frontend session tests, TypeScript validation, and build when the task calls for them. Fix failures before reporting completion. Do not claim a command passed unless it was actually run; distinguish current checks from historical Phase 7 results. Avoid commands that modify data when doing read-only review/documentation work.
+Use the exact Windows commands in the development guide. Distinguish current execution from historical reports. The latest available full backend result is 79 passing tests as reported by the independent security review; it was not rerun in the documentation inspection. Latest frontend tests (five assertions) and TypeScript check passed; the latest production build failed because esbuild hit `spawn EPERM`. The actual nested backend virtualenv imports Django 6.1.3, but backend checks were not rerun with it during the inspection. Do not claim a check passed unless it was run.
 
-At task completion report files changed, behavior implemented, tests/checks performed with outcomes, and remaining limitations. Keep changes focused and save them. No deployment, remote configuration, commit, or push unless explicitly requested.
+No browser E2E suite exists. Production database setup, shared cache, key backup/recovery, HTTPS/deployment operations, and independent audit retention remain unresolved. Report files changed, checks actually run, errors/limitations, and discrepancies. Do not stage or commit unless separately asked.

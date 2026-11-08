@@ -112,6 +112,7 @@ export default function EnvironmentVariables({ projectId, onAuditChange, environ
     try {
       const result = await projectsApi.revealVariable(projectId, selectedEnvironmentId, variable.id);
       setRevealed((current) => ({ ...current, [variable.id]: result.value }));
+      onAuditChange();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not reveal this value.');
     }

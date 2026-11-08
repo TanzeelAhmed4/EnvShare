@@ -2,55 +2,53 @@
 
 ## Current state
 
-Phases 1–7 are implemented. EnvShare has its local Django REST Framework backend, React client, SQLite database, session authentication, project sharing, environment variables, encrypted sensitive values, import preview/confirmation, and audit history. The application has not been deployed and is not declared production-ready.
+EnvShare implements a local course-project workflow for account sessions, projects, project membership, three environments, Standard and Sensitive variables, `.env` import preview/confirmation, and variable audit history. It has not been deployed and is not production-ready or production-certified.
 
-Registration attempts are throttled separately from login: five attempts per client IP per hour. Login remains limited to five attempts per minute.
+### Security behavior in the current source
 
-The original course PDF is the functional authority. Its requirements are preserved: authentication; projects and registered-user sharing; Development, Staging, and Production environments; Standard/Sensitive key-value variables; encryption and authorized reveal; `.env` parsing and a New/Update/Unchanged preview before save; audit records for additions, changes, and deletions; accessible history; secure password handling; clear errors; and consistent UI.
+- Signup, login, logout, CSRF-token, and current-user endpoints use Django sessions and CSRF protection for mutations. Argon2 is the first configured password hasher.
+- Login has independent controls: 5 requests per client IP per minute and a username-based failed-password bucket allowing 5 failures within 15 minutes before a 60-second cooldown. Cache keys contain an HMAC digest of an NFKC-normalized, trimmed, lowercase username, not the raw username or password. Successful authentication clears that username's failure and cooldown keys. Registration has a separate 5-per-hour client-IP throttle.
+- Login uses Django's `username__iexact` lookup to resolve case variants to the stored username before calling Django authentication. Usernames and non-empty emails have case-insensitive uniqueness constraints using `Lower`. These Django ORM lookups and constraints can map to PostgreSQL, but only SQLite is configured here and PostgreSQL behavior has not been runtime-tested.
+- Sensitive values are encrypted using AES-256-GCM, a random 12-byte nonce, and associated data bound to the environment identifier and variable key. Ordinary serializers mask them. Standard values are stored as plaintext.
+- A successful Sensitive reveal is audited as action `revealed` with actor, project, environment, variable ID/key, and timestamp. The event's changes object is empty; plaintext is not passed to the audit recorder. Audit persistence happens before returning plaintext, and a failed audit write produces a generic 503 response without the value. Invalid access, missing variables, Standard variables, and decryption failures do not create reveal events.
+- Variable mutations and their audit rows are transactional. Audit changes redact Sensitive values. Audit history is scoped to projects visible to the requesting owner/member.
+- The frontend's `AuditEvent` union includes `revealed`; `EnvironmentVariables` invokes its audit-change callback only after reveal succeeds, causing the parent workspace's audit refresh token to change and the timeline to fetch again.
 
-## Phase record
+Migration `backend/projects/migrations/0004_reveal_audit_action.py` depends on project migration `0003_environmentvariableauditevent` and alters the existing `action` choices to add `revealed`. The model choice and migration agree. It adds no column and does not change the field's `max_length`.
 
-| Phase | Scope | Status |
+## Verification status
+
+Dates below use the project/client date context, 2026-11-08. These entries distinguish reported history from commands actually run in the latest verification session.
+
+| Check | Result | Evidence and limits |
 |---|---|---|
-| 1 | Project configuration, dependency manifests, Django REST Framework, React initialization | Completed |
-| 2 | Registration, session login/logout, CSRF, Argon2 preference, auth screens and tests | Completed |
-| 3 | Projects, registered-user membership, roles, owner/member access and tests | Completed |
-| 4 | Three environments, variable CRUD, AES-256-GCM, masking/reveal and tests | Completed |
-| 5 | `.env` parsing, comparison preview, explicit confirmation and tests | Completed |
-| 6 | Variable audit timeline, actor attribution, safe change details, import audit and tests | Completed |
-| 7 | Focused security hardening, dependency advisory review, regression tests, local config validation | Completed; not a production-readiness certification |
-| 8 | Browser-based local demonstration and course-submission preparation | Next; not started |
+| Full backend suite | **79 passed, reported** | The independent security-review report says all 79 passed. The suite was not rerun during documentation work. |
+| Django `check` and migration dry-run | **Previously reported passed; latest attempt unavailable** | An earlier report says both passed. The recent attempt used system Python and failed before Django started (`ModuleNotFoundError`). The requested root-level `backend.venv` path was absent. This inspection found the existing `backend\.venv\Scripts\python.exe` and verified Django 6.1.3 imports, but did not rerun checks or tests with it. |
+| Frontend tests | **PASS, most recent run** | `npm.cmd test` passed 5 auth-session response assertions. |
+| TypeScript check | **PASS, most recent run** | `npm.cmd run check` completed `tsc -b --pretty false` successfully. |
+| Production build | **FAIL, most recent run** | `npm.cmd run build`: TypeScript completed, then Vite/esbuild failed to spawn with `spawn EPERM`. This is an execution-environment failure; no successful build was established by that run. |
+| `git diff --check` | **PASS, most recent run** | No whitespace errors; Git printed line-ending conversion warnings. |
 
-## Verification record
+The independent review also reported 79 backend tests passing and frontend test/type checks passing. That report did not establish a production build result. Older README/phase notes recorded 59, 65, and 71 tests from earlier checkpoints; those counts are superseded by the latest reported count of 79 and are retained here only as historical context, not current test status.
 
-**Previously reported for Phase 7:** 59 backend tests passed; Django system checks passed; migration consistency check reported no changes; `pip check` was clean; frontend session assertions, TypeScript check, and Vite build passed; npm audit reported zero vulnerabilities. A production-mode deployment check had two warnings because HSTS subdomain coverage and preload were intentionally disabled pending domain review. Browser end-to-end tests were not configured.
+No tests were rerun during this documentation update. The backend test modules declare 79 test functions/methods by source inspection; declaration count is not itself a test execution result.
 
-**Rerun during this documentation inspection:** Django `check` passed with no issues; `makemigrations --check --dry-run` reported no changes; `pip check` found no broken requirements; five frontend session assertions passed; TypeScript `--noEmit --incremental false` passed. All listed accounts and projects migrations were shown as applied. The full backend suite and frontend production build were not rerun in this documentation-only pass.
+## Scope and missing functionality
 
-**Registration throttle change:** all 65 backend tests passed, including six new regression tests for configured rates, allowed requests, 429 behavior without user creation, isolation from login/unrelated endpoints, CSRF enforcement, and sensitive-input redaction. Django `check` passed. No migration was added or applied.
+Implemented: authentication, project creation and creator-managed registered membership, owner/member project access, environment/variable CRUD, Sensitive reveal, import preview/confirmation, audit history, and basic responsive React UI.
 
-No database migration or write, dependency installation, build, deployment, or secret/key operation was performed during this documentation pass.
+Not implemented or not verified: hosted deployment; production database support/configuration; browser end-to-end tests; email verification or password reset; MFA; project update/delete UI/API; encryption-key rotation/recovery; off-site/tamper-proof audit retention; multi-worker shared-cache operation. The current project list/detail supports creating and reading projects; membership administration is creator-only. No additional member role hierarchy exists.
 
-## Current limitations
+## Remaining production risks
 
-- No browser end-to-end test suite; manual full-workflow verification remains for Phase 8.
-- No deployment infrastructure or production database configuration.
-- No encryption-key rotation/recovery process; preserving the key is essential to decrypt existing Sensitive values.
-- SQLite and the local-memory login throttle are local-development choices.
-- Audit records are not tamper-proof and are deleted through project cascade.
-- HSTS subdomain and preload policy needs domain-specific review before deployment.
+- **Shared throttling cache:** Django's current default cache is local-memory/process-local. IP and username throttle counters are not coordinated across multiple workers. Configure and test a shared Redis cache (or an equivalent shared backend) before multi-worker deployment.
+- **Repeated cooldown denial of service:** an attacker who knows a username can repeatedly submit enough wrong passwords after each 60-second cooldown expires, continuing to block that account temporarily. This is an acknowledged account-targeted denial-of-service risk.
+- **Database operations:** settings hard-code SQLite. Select and configure a production database, then validate migrations, locking, backups, restore, capacity, and operational monitoring.
+- **Encryption key recovery:** the AES key is external process configuration. There is no rotation or recovery workflow. Back up and restrict access to the existing key; losing or replacing it makes stored Sensitive values unreadable.
+- **HTTPS and deployment:** production mode requires explicit host/origin/secret/key configuration and HTTPS CORS origins, turns on secure cookies and SSL redirect, and configures HSTS. Actual TLS termination, proxy behavior, domain coverage, HSTS subdomain/preload choices, secret delivery, static assets, and deployment automation remain unimplemented/unverified.
+- **Audit durability:** audit rows are application-level and mutable by database operators; they cascade with project deletion and are not exported to an independent append-only store.
+- **Validation coverage:** the frontend suite is small and no browser-level integration/E2E suite exists. A prior production build attempt failed at process spawn.
 
-## Repository and secret handling
+## Next work
 
-The root, backend, and frontend ignore files exist. The root `.gitignore` includes local environment files, Python artifacts, SQLite databases, frontend dependencies/builds, generated files, and private-key/certificate extensions. The `.env.example` files were reviewed by classification without printing values: the backend file uses placeholders including an instruction for supplying a generated encryption key; the frontend file contains a local API URL. Neither was found to contain an actual credential/key or private URL. Actual `.env` files must remain private.
-
-At inspection, `git status --short` showed the root `backend/`, `frontend/`, and `docs/` directories and root README/ignore file as untracked. Review all contents before the first commit, particularly to ensure ignored local secrets and database files are not force-added. The documentation directory contained no documents before this update. No Git staging, commit, remote, or push operation was performed.
-
-## Phase 8 exit criteria
-
-1. Start backend and frontend using the documented Windows commands.
-2. Verify signup, login/logout, project creation, member addition, environment switching, variable CRUD, Sensitive masking/reveal, import preview/confirmation, and history in a real browser.
-3. Verify outsider and member/owner permissions in the browser against backend behavior.
-4. Record only reproducible defects and resolve them with focused regression coverage.
-5. Re-run the backend suite, Django checks, migration consistency check, frontend tests, TypeScript check, and production build before marking Phase 8 complete.
-6. Keep deployment out of scope unless the user separately approves it.
+Complete the local browser demonstration and submission checklist. Verify signup/login, owner/member permissions, project and environment navigation, variable CRUD, Sensitive masking/reveal plus timeline refresh, import confirmation, and audit history. Rerun backend tests/checks/migration dry-run with `backend\.venv\Scripts\python.exe`, rerun frontend tests/type check, and obtain a successful production build in an environment that permits esbuild child-process startup. Deployment remains out of scope unless separately authorized.

@@ -201,3 +201,8 @@ REST_FRAMEWORK = {
         'registration': '5/hour',
     },
 }
+
+# Failed-password throttling is separate from the per-IP login request throttle.
+LOGIN_USERNAME_FAILURE_LIMIT = 5
+LOGIN_USERNAME_FAILURE_WINDOW_SECONDS = 15 * 60
+LOGIN_USERNAME_COOLDOWN_SECONDS = 60

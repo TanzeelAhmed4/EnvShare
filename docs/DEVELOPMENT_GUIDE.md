@@ -1,71 +1,50 @@
 # Local development guide (Windows PowerShell)
 
-## Prerequisites
+## Existing tools in this checkout
 
-- Python compatible with the pinned Django release; use the Python installation already used by this project where possible.
-- Node.js/npm compatible with the locked Vite release.
-- PowerShell, the project checkout, and the existing local encryption key if the database contains Sensitive variables.
+This checkout contains the backend virtual environment at `backend\.venv`; its interpreter imports Django 6.1.3. Use it explicitly. The path `backend.venv` at the repository root does not exist. Node dependencies are expected under `frontend\node_modules`; inspect their availability before running npm commands. Do not reinstall packages just to perform routine checks.
 
-Do not replace the key for an existing database. The `.env.example` files contain configuration placeholders/local settings, not usable credentials. Keep actual `.env` files outside Git.
+## Environment configuration
 
-## Install dependencies
+Django settings read process environment variables directly. They do not load `.env` files. Do not print values while checking configuration, and do not put secrets in command history, source, or shared logs.
 
-From the repository root:
+For local development, `DJANGO_ENV` defaults to `development`; override it only when needed. Set a private `DJANGO_SECRET_KEY` and, when creating/revealing Sensitive variables, `ENVSHARE_ENCRYPTION_KEY` to Base64 text that decodes to 32 bytes. The development fallback Django key is unsuitable for shared or deployed use. If the database already contains Sensitive values, use the existing encryption key: replacing or losing it makes those values unreadable. Do not generate a replacement key for an existing database.
 
-```powershell
-cd backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python manage.py migrate
-python manage.py check
-cd ..\frontend
-npm.cmd ci
-```
+The backend defaults to SQLite at `backend\db.sqlite3`, CORS/CSRF origin `http://localhost:5173`, and local API port 8000. The frontend API defaults to `http://localhost:8000/api`; set `VITE_API_BASE_URL` in the frontend process only if the API is elsewhere.
 
-If this checkout already has `backend\.venv` and `frontend\node_modules`, do not recreate them unless needed. `npm ci` reinstalls locked packages and is not needed for routine startup.
+## Start the application
 
-## Configure local backend environment
-
-Copy `backend\.env.example` to a private `backend\.env` only if using a local environment loader, or set variables in the PowerShell process before launching Django. The project settings read process environment values; verify the current setup’s loader behavior before assuming a `.env` file is loaded automatically. At minimum configure local development mode and a strong Django secret key. Configure `ENVSHARE_ENCRYPTION_KEY` as a Base64-encoded 32-byte key.
-
-For a **new, empty local database only**, generate a new key in a private shell using Python and set it in that shell. Never paste the generated value into chat, logs, source control, or a shared terminal transcript. For an existing database, use only its existing key. Losing or replacing that key makes existing Sensitive values unreadable.
-
-The frontend default API URL is `http://localhost:8000/api`; `frontend/.env.example` sets `VITE_API_BASE_URL` to the same local endpoint. Django’s local CORS/CSRF settings must allow the Vite origin `http://localhost:5173`.
-
-## Start both servers
-
-Open two PowerShell terminals from the repository root.
-
-**Terminal 1 — backend:**
+From the repository root, in the first PowerShell terminal:
 
 ```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-python manage.py runserver 127.0.0.1:8000
+.\backend\.venv\Scripts\python.exe backend\manage.py runserver 127.0.0.1:8000
 ```
 
-**Terminal 2 — frontend:**
+In a second terminal, from the repository root:
 
 ```powershell
-cd frontend
-npm.cmd run dev -- --host 127.0.0.1 --port 5173
+Set-Location frontend
+npm.cmd run dev -- --host localhost --port 5173
 ```
 
-Open **http://localhost:5173**. The API root is **http://localhost:8000/api/**. Use `localhost` consistently for both browser origins; mixing `localhost` and `127.0.0.1` can affect cookie/CSRF behavior.
+Open `http://localhost:5173`. Use `localhost` consistently in the browser and API/CORS origins; mixing `localhost` and `127.0.0.1` can affect session/CSRF behavior.
 
-## Checks
+## Backend checks
 
-Backend commands (from `backend/`):
+Run from the repository root with the existing interpreter:
 
 ```powershell
-.\.venv\Scripts\python.exe -B manage.py check
-.\.venv\Scripts\python.exe -B manage.py makemigrations --check --dry-run
-.\.venv\Scripts\python.exe -B manage.py test accounts projects
-.\.venv\Scripts\python.exe -B -m pip check
+.\backend\.venv\Scripts\python.exe -B backend\manage.py test
+.\backend\.venv\Scripts\python.exe -B backend\manage.py check
+.\backend\.venv\Scripts\python.exe -B backend\manage.py makemigrations --check --dry-run
+.\backend\.venv\Scripts\python.exe -B -m pip check
 ```
 
-Frontend commands (from `frontend/`):
+Django's test runner uses a test database; checks and migration dry-run are not a substitute for inspecting the local database before applying migrations. To apply migrations intentionally, run `python.exe backend\manage.py migrate` only after reviewing the pending migration list and protecting existing local data. Never use `flush`, delete the database, or rewrite applied migrations to silence drift.
+
+## Frontend checks
+
+Run from `frontend\`:
 
 ```powershell
 npm.cmd test
@@ -73,16 +52,21 @@ npm.cmd run check
 npm.cmd run build
 ```
 
-The backend test suite may create a temporary test database. `migrate` changes the local database schema by applying unapplied migrations; inspect migration status first when working with important local data. Do not use `flush`, delete the database, or regenerate the encryption key as routine troubleshooting.
+The current test script runs `tests/authSession.test.mjs` (five response assertions). `check` runs TypeScript project checking. `build` runs TypeScript project build followed by Vite production bundling.
+
+## Production configuration boundary
+
+`DJANGO_ENV=production` requires a private `DJANGO_SECRET_KEY` of at least 50 characters, `DJANGO_ALLOWED_HOSTS` with explicit host names, HTTPS-only `DJANGO_CORS_ALLOWED_ORIGINS`, and a valid Base64-encoded 32-byte `ENVSHARE_ENCRYPTION_KEY`. HSTS duration must be at least one day; preload additionally requires subdomains and a one-year duration. Secure cookies and SSL redirect are enabled. These validations do not configure a production database, shared cache, TLS proxy, static hosting, backups, monitoring, or deployment. The application is not production-ready.
 
 ## Troubleshooting
 
-- **Sensitive encryption unavailable:** check that the running Django process has `ENVSHARE_ENCRYPTION_KEY` configured in valid Base64 form decoding to exactly 32 bytes. Do not print the value. Restart Django after changing process environment.
-- **Sensitive values fail to decrypt:** verify the existing key is being used. Do not generate a replacement key.
-- **CSRF or session errors:** confirm both servers use the documented origins, requests include credentials, and Django allows/trusts the Vite origin.
-- **API connection errors:** confirm Django is listening on port 8000 and the effective `VITE_API_BASE_URL` points to its `/api` path; restart Vite after changing its environment.
-- **Migration drift:** inspect model and migration history before generating an additive migration. Never reset the database to silence drift.
+- **Django import error:** invoke the existing interpreter explicitly as `backend\.venv\Scripts\python.exe`; do not assume the active global Python has Django.
+- **Encryption unavailable/decryption fails:** check that the process has the correct existing Base64-encoded key configured. Never print or replace it as troubleshooting.
+- **CSRF/session errors:** verify origin consistency, credentialed requests, cookie acceptance, and configured CORS/CSRF origins.
+- **API connection errors:** confirm Django is listening on port 8000 and `VITE_API_BASE_URL` ends with `/api`; restart Vite after process-environment changes.
+- **Vite build fails with `spawn EPERM`:** the frontend TypeScript check can pass while Vite/esbuild cannot start a child process. Run the build in an environment that permits esbuild process startup; do not describe a failed build as successful.
+- **Migration drift:** inspect model and migration history, then create a new additive migration only when needed. Do not reset the database.
 
-## Verified in this documentation pass
+## Verification record
 
-Safe checks rerun: Django system check, migration dry-run, `pip check`, five frontend session assertions, and TypeScript no-emit validation. The full backend test suite and frontend build were not rerun in this pass; see [project status](PROJECT_STATUS.md) for prior Phase 7 results.
+The latest frontend test and TypeScript commands passed; the latest production build attempt failed at esbuild startup with `spawn EPERM`. The latest backend suite result available is a 79-pass result reported by the independent security review, not rerun during documentation work. The system-Python attempt lacked Django; the actual nested `backend\.venv` interpreter was found and its Django import/version verified during this inspection, but backend tests/checks were not rerun here. Full details are in [PROJECT_STATUS.md](PROJECT_STATUS.md).

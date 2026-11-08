@@ -7,6 +7,7 @@ from django.db import IntegrityError, transaction
 from argon2.low_level import Type
 from rest_framework.test import APIClient
 from unittest.mock import patch
+import time
 
 
 class ProjectSetupTests(SimpleTestCase):
@@ -97,8 +98,10 @@ class AuthenticationApiTests(TestCase):
     def tearDown(self):
         cache.clear()
 
-    def csrf_post(self, path, data=None):
-        csrf_response = self.client.get('/api/auth/csrf/', HTTP_HOST='localhost')
+    def csrf_post(self, path, data=None, remote_addr='127.0.0.1'):
+        csrf_response = self.client.get(
+            '/api/auth/csrf/', HTTP_HOST='localhost', REMOTE_ADDR=remote_addr,
+        )
         self.assertEqual(csrf_response.status_code, 200)
         return self.client.post(
             path,
@@ -106,6 +109,7 @@ class AuthenticationApiTests(TestCase):
             format='json',
             HTTP_HOST='localhost',
             HTTP_X_CSRFTOKEN=csrf_response.json()['csrfToken'],
+            REMOTE_ADDR=remote_addr,
         )
 
     def register(self, username='envuser', email='envuser@example.com'):
@@ -297,6 +301,42 @@ class AuthenticationApiTests(TestCase):
         self.assertEqual(valid.json()['username'], user.username)
         self.assertEqual(self.client.get('/api/auth/me/', HTTP_HOST='localhost').status_code, 200)
 
+    def test_login_accepts_different_username_casing_without_changing_stored_name(self):
+        user = get_user_model().objects.create_user(
+            username='MixedCaseUser', password=self.valid_password,
+        )
+
+        response = self.csrf_post('/api/auth/login/', {
+            'username': 'mixedcaseuser', 'password': self.valid_password,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['username'], 'MixedCaseUser')
+        user.refresh_from_db()
+        self.assertEqual(user.username, 'MixedCaseUser')
+
+    def test_login_with_surrounding_whitespace_keeps_serializer_trimming_behavior(self):
+        get_user_model().objects.create_user(
+            username='trimmed-user', password=self.valid_password,
+        )
+
+        response = self.csrf_post('/api/auth/login/', {
+            'username': '  trimmed-user  ', 'password': self.valid_password,
+        })
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_nonexistent_username_returns_generic_authentication_error(self):
+        marker = 'definitely-not-a-real-account'
+
+        response = self.csrf_post('/api/auth/login/', {
+            'username': marker, 'password': 'incorrect-password',
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {'detail': 'Username or password is incorrect.'})
+        self.assertNotIn(marker, response.content.decode())
+
     def test_private_endpoint_rejects_anonymous_user(self):
         response = self.client.get('/api/auth/me/', HTTP_HOST='localhost')
 
@@ -353,3 +393,171 @@ class AuthenticationApiTests(TestCase):
         self.assertEqual(statuses, [400, 400, 429])
         self.assertNotIn('not-a-real-password', response.content.decode())
         cache.clear()
+
+    @override_settings(
+        LOGIN_USERNAME_FAILURE_LIMIT=3,
+        LOGIN_USERNAME_FAILURE_WINDOW_SECONDS=900,
+        LOGIN_USERNAME_COOLDOWN_SECONDS=30,
+        REST_FRAMEWORK={
+            'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+            'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+            'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+            'DEFAULT_THROTTLE_RATES': {'login': '100/minute'},
+        },
+    )
+    def test_username_failures_share_cooldown_across_ips_and_case_variants(self):
+        get_user_model().objects.create_user(username='TargetUser', password=self.valid_password)
+        password_marker = 'wrong-password-marker'
+
+        with patch('accounts.auth_views.LoginAttemptThrottle.rate', '100/minute'):
+            attempts = [
+                self.csrf_post('/api/auth/login/', {'username': 'TargetUser', 'password': password_marker}, '192.0.2.1'),
+                self.csrf_post('/api/auth/login/', {'username': 'targetuser', 'password': password_marker}, '192.0.2.2'),
+                self.csrf_post('/api/auth/login/', {'username': 'TARGETUSER', 'password': password_marker}, '192.0.2.3'),
+            ]
+            limited = self.csrf_post(
+                '/api/auth/login/', {'username': 'tArGeTuSeR', 'password': password_marker}, '192.0.2.4',
+            )
+
+        self.assertEqual([response.status_code for response in attempts], [400, 400, 400])
+        self.assertEqual(limited.status_code, 429)
+        self.assertTrue(limited['Retry-After'].isdigit())
+        self.assertGreater(int(limited['Retry-After']), 0)
+        self.assertNotIn(password_marker, limited.content.decode())
+
+    @override_settings(
+        LOGIN_USERNAME_FAILURE_LIMIT=3,
+        LOGIN_USERNAME_FAILURE_WINDOW_SECONDS=900,
+        LOGIN_USERNAME_COOLDOWN_SECONDS=30,
+        REST_FRAMEWORK={
+            'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+            'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+            'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+            'DEFAULT_THROTTLE_RATES': {'login': '100/minute'},
+        },
+    )
+    def test_different_usernames_from_one_ip_have_independent_failure_counters(self):
+        with patch('accounts.auth_views.LoginAttemptThrottle.rate', '100/minute'):
+            alice_failures = [
+                self.csrf_post('/api/auth/login/', {'username': 'alice', 'password': 'bad'}, '192.0.2.8')
+                for _ in range(2)
+            ]
+            bob_failures = [
+                self.csrf_post('/api/auth/login/', {'username': 'bob', 'password': 'bad'}, '192.0.2.8')
+                for _ in range(2)
+            ]
+            alice_threshold = self.csrf_post(
+                '/api/auth/login/', {'username': 'alice', 'password': 'bad'}, '192.0.2.8',
+            )
+            bob_threshold = self.csrf_post(
+                '/api/auth/login/', {'username': 'bob', 'password': 'bad'}, '192.0.2.8',
+            )
+            alice_limited = self.csrf_post(
+                '/api/auth/login/', {'username': 'ALICE', 'password': 'bad'}, '192.0.2.8',
+            )
+
+        self.assertEqual([r.status_code for r in alice_failures + bob_failures], [400] * 4)
+        self.assertEqual(alice_threshold.status_code, 400)
+        self.assertEqual(bob_threshold.status_code, 400)
+        self.assertEqual(alice_limited.status_code, 429)
+
+    @override_settings(
+        LOGIN_USERNAME_FAILURE_LIMIT=3,
+        LOGIN_USERNAME_FAILURE_WINDOW_SECONDS=900,
+        LOGIN_USERNAME_COOLDOWN_SECONDS=30,
+        REST_FRAMEWORK={
+            'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+            'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+            'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+            'DEFAULT_THROTTLE_RATES': {'login': '100/minute'},
+        },
+    )
+    def test_successful_login_clears_prior_username_failures(self):
+        get_user_model().objects.create_user(
+            username='recovering-user', password=self.valid_password,
+        )
+        with patch('accounts.auth_views.LoginAttemptThrottle.rate', '100/minute'):
+            for _ in range(2):
+                self.assertEqual(self.csrf_post('/api/auth/login/', {
+                    'username': 'recovering-user', 'password': 'incorrect',
+                }).status_code, 400)
+
+            successful = self.csrf_post('/api/auth/login/', {
+                'username': 'recovering-user', 'password': self.valid_password,
+            })
+            self.assertEqual(successful.status_code, 200)
+
+            for _ in range(3):
+                self.assertEqual(self.csrf_post('/api/auth/login/', {
+                    'username': 'recovering-user', 'password': 'incorrect',
+                }).status_code, 400)
+            limited = self.csrf_post('/api/auth/login/', {
+                'username': 'recovering-user', 'password': 'incorrect',
+            })
+
+        self.assertEqual(limited.status_code, 429)
+
+    @override_settings(
+        LOGIN_USERNAME_FAILURE_LIMIT=2,
+        LOGIN_USERNAME_FAILURE_WINDOW_SECONDS=900,
+        LOGIN_USERNAME_COOLDOWN_SECONDS=30,
+        REST_FRAMEWORK={
+            'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+            'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+            'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+            'DEFAULT_THROTTLE_RATES': {'login': '100/minute'},
+        },
+    )
+    def test_username_cooldown_expires_and_allows_new_attempts(self):
+        with patch('accounts.auth_views.LoginAttemptThrottle.rate', '100/minute'):
+            for _ in range(2):
+                self.assertEqual(self.csrf_post('/api/auth/login/', {
+                    'username': 'cooldown-user', 'password': 'incorrect',
+                }).status_code, 400)
+            limited = self.csrf_post('/api/auth/login/', {
+                'username': 'cooldown-user', 'password': 'incorrect',
+            })
+            self.assertEqual(limited.status_code, 429)
+
+            now = time.time()
+            with patch('accounts.auth_views.time.time', return_value=now + 31):
+                after_expiry = self.csrf_post('/api/auth/login/', {
+                    'username': 'cooldown-user', 'password': 'incorrect',
+                })
+
+        self.assertEqual(after_expiry.status_code, 400)
+
+    def test_username_throttle_cache_keys_use_keyed_digest_not_raw_username(self):
+        from accounts.auth_views import _login_username_cache_keys
+
+        lower_keys = _login_username_cache_keys('CacheTarget')
+        normalized_keys = _login_username_cache_keys('cachetarget')
+
+        self.assertEqual(lower_keys, normalized_keys)
+        self.assertTrue(all('cachetarget' not in key for key in lower_keys))
+        self.assertTrue(all('password' not in key for key in lower_keys))
+
+    def test_username_throttle_normalizes_nfkc_and_whitespace_without_changing_identity(self):
+        from accounts.auth_views import _login_username_cache_keys
+
+        ascii_keys = _login_username_cache_keys('alice')
+        fullwidth_keys = _login_username_cache_keys('\uff41\uff4c\uff49\uff43\uff45')
+        padded_keys = _login_username_cache_keys('  alice  ')
+
+        self.assertEqual(fullwidth_keys, ascii_keys)
+        self.assertEqual(padded_keys, ascii_keys)
+
+    @override_settings(REST_FRAMEWORK={
+        'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework.authentication.SessionAuthentication'],
+        'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+        'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
+        'DEFAULT_THROTTLE_RATES': {'login': '2/minute'},
+    })
+    def test_missing_username_still_counts_toward_ip_throttle(self):
+        with patch('accounts.auth_views.LoginAttemptThrottle.rate', '2/minute'):
+            statuses = [
+                self.csrf_post('/api/auth/login/', {'password': 'private-input'}, '192.0.2.9').status_code
+                for _ in range(3)
+            ]
+
+        self.assertEqual(statuses, [400, 400, 429])

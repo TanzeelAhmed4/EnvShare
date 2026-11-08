@@ -57,7 +57,7 @@ export type AuditEvent = {
   environment_label: string;
   variable_id: number;
   variable_key: string;
-  action: 'created' | 'updated' | 'deleted';
+  action: 'created' | 'updated' | 'deleted' | 'revealed';
   action_label: string;
   actor: string;
   changes: { key?: AuditChange; sensitivity?: AuditChange; value?: AuditChange };

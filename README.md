@@ -1,94 +1,56 @@
 # EnvShare
 
-EnvShare is a local course project for sharing and managing environment variables across a team. It provides session-based authentication, project membership, three project environments, protected variable management, `.env` import preview, and an audit timeline.
+EnvShare is a local course project for sharing project environment variables with registered teammates. It combines a Django REST Framework API with a React and TypeScript client. It is intended for local demonstration and course submission; it has not been deployed and is not certified production-ready.
 
-**Status:** Phases 1–7 are implemented. The application is intended for local demonstration and course submission. Deployment has not started; this documentation does not claim production readiness.
+## Implemented features
 
-## Completed features
+- Session-based signup, login, logout, current-user lookup, CSRF protection, and Argon2-preferred password hashing.
+- Login request limiting by client IP (5 requests per minute), plus a separate failed-password counter keyed by an HMAC of the normalized username (5 failures in 15 minutes, then a 60-second cooldown). Registration is limited to 5 attempts per client IP per hour.
+- Case-insensitive username and email uniqueness constraints. Login resolves username case variants with Django's `username__iexact` lookup before invoking Django authentication. This uses Django ORM expressions; PostgreSQL is not configured or runtime-tested in this project.
+- Projects with a creator and registered members. Creators manage membership; creators and members can view and edit project data. There are no additional member roles.
+- Development, Staging, and Production environments created with each project.
+- Standard and Sensitive variables with key validation and per-environment uniqueness. Sensitive values use AES-256-GCM at rest and are masked in ordinary API responses.
+- Authorized reveal through a dedicated endpoint. Each successful Sensitive reveal records a `revealed` audit event before returning plaintext. The event records context only and has an empty changes object. If the audit write fails, the API withholds plaintext. Failed, unauthorized, missing, Standard-variable, and decryption-failure requests do not create a reveal event.
+- `.env` parsing, preview, and explicit confirmation. New entries require a classification; existing classifications are retained. Sensitive values are masked in previews. The signed preview is bound to the user, project, environment, input, and current variable state and expires after 15 minutes.
+- Application audit history for variable create, update, delete, import, and reveal activity. Sensitive before/after values are redacted. The frontend timeline refreshes after a successful reveal.
+- Frontend handling for expired authentication sessions.
 
-- Signup, login, logout, duplicate username/email validation, password validation, CSRF protection, and session-authenticated private APIs.
-- The existing custom `accounts.User` model is preserved. Argon2 is the preferred password hasher.
-- Project creation and owner-managed membership for registered users. Owners and members can access project data; members cannot manage membership.
-- Exactly Development, Staging, and Production environments per project.
-- Standard and Sensitive environment variables, key validation, and duplicate-key prevention per environment.
-- Sensitive values stored using AES-256-GCM encryption, masked in ordinary API responses, and revealed through a separate authorized operation.
-- `.env` parsing and preview with New, Update (old/new), and Unchanged classifications; confirmation is required before writes. Existing sensitivity is preserved on update, and new variables require a classification.
-- Audit records for variable creation, update, deletion, and import changes, with actor and timestamp. Sensitive plaintext is redacted.
-- Production configuration validation and security settings, login throttling, registration throttling (five attempts per client IP per hour), normalized username/email uniqueness constraints, stale import-preview rejection, and frontend session-expiry handling.
+## Stack and layout
 
-## Architecture
+- Backend: Python, Django 6.1.3, Django REST Framework 3.18.3; local database configuration is SQLite.
+- Frontend: React 18, TypeScript 5.6, Vite 6.4.5, Tailwind CSS and project styles.
+- Key paths: `backend/accounts/`, `backend/projects/`, `backend/config/`, `frontend/src/`, `frontend/tests/`, and `docs/`.
+- Migration `backend/projects/migrations/0004_reveal_audit_action.py` adds the `revealed` audit action to the choices for the existing audit action field. It is additive and follows migration `0003_environmentvariableauditevent.py`.
 
-```text
-Browser (React, TypeScript, Tailwind, Vite)
-  └── Django REST Framework API (session cookies + CSRF)
-        ├── accounts: custom user and authentication
-        ├── projects: projects, membership, environments, variables,
-        │             import preview/confirmation, encryption, audit history
-        └── SQLite: local development and course-submission data
+The encryption key is supplied through the Django process environment and is not stored in the database or source. See [the architecture](docs/ARCHITECTURE.md), [development guide](docs/DEVELOPMENT_GUIDE.md), and [project status](docs/PROJECT_STATUS.md).
+
+## Run locally on Windows
+
+This checkout has an existing virtual environment at `backend\.venv`. From the project root, start the backend with:
+
+```powershell
+.\backend\.venv\Scripts\python.exe backend\manage.py runserver 127.0.0.1:8000
 ```
 
-Backend code lives under `backend/`; frontend code and its npm manifests live under `frontend/`. The encryption key is supplied through environment configuration and must remain separate from source control and the database. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+In a second PowerShell window, run:
 
-## Repository layout
-
-```text
-EnvShare/
-├── .gitignore
-├── README.md
-├── docs/
-│   ├── AI_AGENT_HANDOFF.md
-│   ├── ARCHITECTURE.md
-│   ├── DEVELOPMENT_GUIDE.md
-│   └── PROJECT_STATUS.md
-├── backend/
-│   ├── accounts/       # custom user, auth, migrations, tests
-│   ├── config/         # Django settings and URL routing
-│   ├── projects/       # projects, variables, import, encryption, audit
-│   ├── manage.py
-│   └── requirements.txt
-└── frontend/
-    ├── src/            # React screens, API helpers, styling
-    ├── tests/
-    ├── package.json
-    └── package-lock.json
+```powershell
+Set-Location frontend
+npm.cmd run dev -- --host localhost --port 5173
 ```
 
-## Files created and modified
+Open `http://localhost:5173`. Configure required development environment variables in the process before starting Django. Settings read process environment variables; they do not load `.env` files themselves. For details and test commands, see [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md).
 
-The implementation spans Phases 1–7. Important existing and added files include:
+## Verification record
 
-- **Backend configuration and accounts:** `backend/config/settings.py`, `backend/config/security_settings.py`, `backend/config/urls.py`, `backend/accounts/models.py`, `backend/accounts/auth_views.py`, `backend/accounts/serializers.py`, `backend/accounts/tests.py`, and `backend/accounts/migrations/0001_initial.py` plus the additive `0002_alter_user_options_and_more.py`.
-- **Projects and data workflows:** `backend/projects/models.py`, `permissions.py`, `serializers.py`, `views.py`, `environment_views.py`, `environment_serializers.py`, `encryption.py`, `env_import.py`, `audit.py`, `audit_views.py`, `signals.py`, the project test modules, and migrations `0001_initial.py` through `0003_environmentvariableauditevent.py`.
-- **Frontend:** `frontend/src/App.tsx`, `authApi.ts`, `authSession.ts`, `projectsApi.ts`, `ProjectWorkspace.tsx`, `EnvironmentVariables.tsx`, `AuditTimeline.tsx`, stylesheets, and `frontend/tests/authSession.test.mjs`.
-- **Manifests and local configuration examples:** `backend/requirements.txt`, `backend/.env.example`, `frontend/package.json`, `frontend/package-lock.json`, and `frontend/.env.example`.
-- **Repository documentation and ignores:** root `.gitignore`, `backend/.gitignore`, `frontend/.gitignore`, this README, and the four documents under `docs/`.
+The most recent independent security-review report states that all 79 backend tests passed. That result is reported history, not a rerun during the documentation inspection. The latest frontend test and TypeScript commands passed (5 session assertions and `tsc -b --pretty false`). The latest production build attempt failed when esbuild could not spawn (`spawn EPERM`); TypeScript compilation inside the build completed before that failure. The latest Django commands attempted with the active system Python could not import Django. The root-level path `backend.venv` that was requested for a retry does not exist; this inspection found `backend\.venv\Scripts\python.exe` and verified it imports Django 6.1.3, but did not rerun the suite with it. See [PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the full dated status and limits.
 
-This is a phase-level summary rather than a per-commit change log. The original custom user model and applied migrations were preserved; Phase 7 added an account constraint migration without resetting the local database.
+## Important limitations
 
-## Dependencies
-
-Backend versions are pinned in `backend/requirements.txt`: Django 6.1.3, Django REST Framework 3.18.3, django-cors-headers 4.9.0, argon2-cffi 25.1.0, and cryptography 46.0.3.
-
-Frontend versions are recorded in `frontend/package-lock.json`: React 18, React DOM 18, Lucide React, TypeScript 5.6, Vite 6.4.5, the Vite React plugin, Tailwind CSS 3, PostCSS, and Autoprefixer. The Phase 7 dependency review reported zero npm audit findings after the Vite update; see [known issues](docs/PROJECT_STATUS.md) for the scope of verification.
-
-## Local setup and checks
-
-Use the exact PowerShell setup and startup commands in [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md). In short, configure the backend environment, install Python and npm dependencies, apply migrations, then run Django on port 8000 and Vite on port 5173. Open `http://localhost:5173`.
-
-Previously reported Phase 7 verification included 59 passing backend tests, successful Django checks, no migration drift, a clean `pip check`, five frontend session assertions, TypeScript checks, a successful Vite production build, and zero npm audit findings. For registration throttling, the full backend suite passed all 65 tests and Django `check` passed. Frontend checks were not rerun because no frontend files changed.
-
-## Known limitations and risks
-
-- Deployment, hosting, production database operations, and domain-specific HTTPS configuration are not implemented.
-- Browser-based end-to-end tests are not configured. Existing automated tests focus on backend API behavior and a small frontend session helper.
-- AES key rotation and recovery are not implemented. Preserve the current key: replacing it makes existing encrypted values unreadable.
-- SQLite is intended for local use. Concurrent writes and row-lock behavior differ from a production database.
-- Audit history is application-level history, not tamper-proof or independently retained; it follows project deletion.
-- Production HSTS subdomain and preload settings remain disabled pending review of the eventual domain topology.
-- Login throttling uses local-memory cache and is process-local.
-- `.env.example` files contain placeholders/local settings only. Never commit actual `.env` files, credentials, encryption keys, databases, or generated artifacts.
-- The root, backend, and frontend `.gitignore` files were inspected. The root ignore file covers environment files, databases, dependencies/build outputs, and private-key/certificate extensions. At inspection, Git status showed the root `backend/`, `frontend/`, `docs/`, README, and root ignore file as untracked. Review `git status` carefully before the first commit, especially to ensure no local secrets or databases are included. No files were staged or committed during this documentation update.
-
-## Exact next phase
-
-**Phase 8: Local demonstration and submission preparation.** Validate the full user workflow in a browser, document any reproducible defects, and prepare a course-submission checklist. This phase does not authorize deployment or new product features. See [PROJECT_STATUS.md](docs/PROJECT_STATUS.md) and [AI_AGENT_HANDOFF.md](docs/AI_AGENT_HANDOFF.md).
+- No hosted deployment, production database configuration, browser end-to-end suite, password reset, email verification, MFA, or key rotation/recovery is implemented.
+- Django is configured to use SQLite. A production database and its operational procedures remain to be selected and verified.
+- The default Django cache is process-local. Throttling state is not shared between workers; configure and verify a shared cache such as Redis before multi-worker deployment.
+- Username cooldowns can be repeatedly retriggered after expiry by anyone who knows the target username, temporarily denying that account login.
+- Preserve and securely back up the existing encryption key. Loss or replacement makes existing Sensitive values unreadable; recovery and rotation are not implemented.
+- Production requires HTTPS and explicit secure deployment configuration. Hosting, TLS termination, secret provisioning, backups, monitoring, and deployment automation are not supplied.
+- Audit history is application-level, not tamper-proof or independently retained, and project deletion cascades to project audit events.
