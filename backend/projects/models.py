@@ -164,6 +164,9 @@ class EnvironmentVariableAuditEvent(models.Model):
         UPDATED = 'updated', 'Updated'
         DELETED = 'deleted', 'Deleted'
         REVEALED = 'revealed', 'Revealed'
+        RESTORED = 'restored', 'Restored'
+        VERSION_ACCESSED = 'version_accessed', 'Historical value accessed'
+        VERSION_COMPARED = 'version_compared', 'Sensitive versions compared'
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='audit_events')
     environment = models.ForeignKey(
@@ -175,7 +178,7 @@ class EnvironmentVariableAuditEvent(models.Model):
     )
     variable_id = models.PositiveBigIntegerField()
     variable_key = models.CharField(max_length=255)
-    action = models.CharField(max_length=16, choices=Action.choices)
+    action = models.CharField(max_length=20, choices=Action.choices)
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -198,3 +201,50 @@ class EnvironmentVariableAuditEvent(models.Model):
 
     def __str__(self):
         return f'{self.get_action_display()} {self.variable_key} by {self.actor_username}'
+
+
+class EnvironmentVariableVersion(models.Model):
+    class Action(models.TextChoices):
+        CREATED = 'created', 'Created'
+        UPDATED = 'updated', 'Updated'
+        RESTORED = 'restored', 'Restored'
+        DELETED = 'deleted', 'Deleted'
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='variable_versions')
+    environment = models.ForeignKey(
+        Environment, on_delete=models.SET_NULL, null=True, related_name='variable_versions'
+    )
+    environment_id_snapshot = models.PositiveBigIntegerField()
+    variable = models.ForeignKey(
+        EnvironmentVariable, on_delete=models.SET_NULL, null=True, related_name='versions'
+    )
+    variable_id_snapshot = models.PositiveBigIntegerField()
+    variable_key = models.CharField(max_length=255)
+    version_number = models.PositiveIntegerField()
+    encrypted_value = models.TextField()
+    sensitivity = models.CharField(max_length=16, choices=EnvironmentVariable.Sensitivity.choices)
+    action = models.CharField(max_length=16, choices=Action.choices)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='environment_variable_versions',
+    )
+    actor_username = models.CharField(max_length=150)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-version_number', '-pk')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('variable_id_snapshot', 'version_number'),
+                name='unique_variable_version_number',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=('project', 'environment_id_snapshot', 'variable_id_snapshot', 'version_number'),
+                name='variable_version_scope_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.variable_key} v{self.version_number} ({self.get_action_display()})'

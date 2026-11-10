@@ -180,3 +180,4 @@ from .encryption_tests import EncryptionConfigurationTests  # noqa: F401,E402
 from .role_invitation_tests import ProjectRoleAndInvitationTests  # noqa: F401,E402
 from .role_invitation_tests import ExistingMembershipMigrationTests  # noqa: F401,E402
 from .role_invitation_tests import ConcurrentInvitationClaimTests  # noqa: F401,E402
+from .version_tests import EnvironmentVariableVersionTests  # noqa: F401,E402

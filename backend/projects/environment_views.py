@@ -16,9 +16,10 @@ from .audit import _MISSING, record_variable_audit
 from .encryption import EncryptionError, decrypt_value, encrypt_value
 from .env_import import parse_env_content
 from .environment_serializers import EnvironmentSerializer, EnvironmentVariableSerializer
-from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent
+from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent, EnvironmentVariableVersion
 from .permissions import has_project_permission
 from .views import visible_projects_for
+from .versions import create_variable_version
 
 
 def get_project_environment(request, project_id, environment_id=None, permission='view_variables'):
@@ -64,9 +65,16 @@ class EnvironmentVariableListCreateView(APIView):
             context={'environment': environment},
         )
         serializer.is_valid(raise_exception=True)
+        plaintext = serializer.validated_data['value']
         try:
             with transaction.atomic():
                 variable = serializer.save(environment=environment)
+                version = create_variable_version(
+                    variable=variable,
+                    action=EnvironmentVariableVersion.Action.CREATED,
+                    actor=request.user,
+                    plaintext=plaintext,
+                )
                 record_variable_audit(
                     action='created',
                     actor=request.user,
@@ -75,6 +83,7 @@ class EnvironmentVariableListCreateView(APIView):
                     key=variable.key,
                     sensitivity=variable.sensitivity,
                     value_after=variable.value,
+                    extra_changes={'version': {'before': None, 'after': version.version_number}},
                 )
         except EncryptionError as error:
             return encryption_error_response(error)
@@ -110,22 +119,46 @@ class EnvironmentVariableDetailView(APIView):
 
     def patch(self, request, project_id, environment_id, variable_id):
         _project, environment = get_project_environment(request, project_id, environment_id, 'edit_variables')
-        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
-        serializer = EnvironmentVariableSerializer(
-            variable,
-            data=request.data,
-            partial=True,
-            context={'environment': environment},
-        )
-        serializer.is_valid(raise_exception=True)
-        old_key = variable.key
-        old_sensitivity = variable.sensitivity
-        old_value = variable.value
-        new_sensitivity = serializer.validated_data.get('sensitivity', old_sensitivity)
-        include_value = 'value' in serializer.validated_data or new_sensitivity != old_sensitivity
         try:
             with transaction.atomic():
-                updated = serializer.save()
+                variable = get_object_or_404(
+                    EnvironmentVariable.objects.select_for_update(),
+                    pk=variable_id,
+                    environment=environment,
+                )
+                serializer = EnvironmentVariableSerializer(
+                    variable,
+                    data=request.data,
+                    partial=True,
+                    context={'environment': environment},
+                )
+                serializer.is_valid(raise_exception=True)
+                old_key = variable.key
+                old_sensitivity = variable.sensitivity
+                old_value = variable.value
+                old_plaintext = (
+                    decrypt_value(old_value, environment, old_key)
+                    if old_sensitivity == EnvironmentVariable.Sensitivity.SENSITIVE
+                    else old_value
+                )
+                new_sensitivity = serializer.validated_data.get('sensitivity', old_sensitivity)
+                new_key = serializer.validated_data.get('key', old_key)
+                new_plaintext = serializer.validated_data.get('value', old_plaintext)
+                changed = (
+                    new_key != old_key
+                    or new_sensitivity != old_sensitivity
+                    or new_plaintext != old_plaintext
+                )
+                include_value = 'value' in serializer.validated_data or new_sensitivity != old_sensitivity
+                updated = serializer.save() if changed else variable
+                version = None
+                if changed:
+                    version = create_variable_version(
+                        variable=updated,
+                        action=EnvironmentVariableVersion.Action.UPDATED,
+                        actor=request.user,
+                        plaintext=new_plaintext,
+                    )
                 record_variable_audit(
                     action='updated',
                     actor=request.user,
@@ -139,6 +172,10 @@ class EnvironmentVariableDetailView(APIView):
                     value_after=updated.value if include_value else _MISSING,
                     sensitivity_before_for_value=old_sensitivity,
                     sensitivity_after_for_value=updated.sensitivity,
+                    extra_changes=(
+                        {'version': {'before': None, 'after': version.version_number}}
+                        if version else None
+                    ),
                 )
         except EncryptionError as error:
             return encryption_error_response(error)
@@ -154,18 +191,39 @@ class EnvironmentVariableDetailView(APIView):
 
     def delete(self, request, project_id, environment_id, variable_id):
         _project, environment = get_project_environment(request, project_id, environment_id, 'delete_variables')
-        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
-        with transaction.atomic():
-            record_variable_audit(
-                action='deleted',
-                actor=request.user,
-                environment=environment,
-                variable_id=variable.pk,
-                key=variable.key,
-                sensitivity=variable.sensitivity,
-                value_before=variable.value,
-            )
-            variable.delete()
+        try:
+            with transaction.atomic():
+                variable = get_object_or_404(
+                    EnvironmentVariable.objects.select_for_update(),
+                    pk=variable_id,
+                    environment=environment,
+                )
+                plaintext = (
+                    decrypt_value(variable.value, environment, variable.key)
+                    if variable.sensitivity == EnvironmentVariable.Sensitivity.SENSITIVE
+                    else variable.value
+                )
+                version = create_variable_version(
+                    variable=variable,
+                    action=EnvironmentVariableVersion.Action.DELETED,
+                    actor=request.user,
+                    plaintext=plaintext,
+                )
+                record_variable_audit(
+                    action='deleted',
+                    actor=request.user,
+                    environment=environment,
+                    variable_id=variable.pk,
+                    key=variable.key,
+                    sensitivity=variable.sensitivity,
+                    value_before=variable.value,
+                    extra_changes={'version': {'before': None, 'after': version.version_number}},
+                )
+                variable.delete()
+        except EncryptionError as error:
+            return encryption_error_response(error)
+        except IntegrityError:
+            return Response({'detail': 'The variable and its history could not be deleted.'}, status=400)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -403,6 +461,12 @@ class EnvironmentImportConfirmView(APIView):
                             sensitivity=sensitivity,
                         )
                         existing[key] = variable
+                        version = create_variable_version(
+                            variable=variable,
+                            action=EnvironmentVariableVersion.Action.CREATED,
+                            actor=request.user,
+                            plaintext=plaintext,
+                        )
                         record_variable_audit(
                             action='created',
                             actor=request.user,
@@ -411,6 +475,7 @@ class EnvironmentImportConfirmView(APIView):
                             key=variable.key,
                             sensitivity=variable.sensitivity,
                             value_after=variable.value,
+                            extra_changes={'version': {'before': None, 'after': version.version_number}},
                         )
                         created += 1
                     else:
@@ -429,6 +494,12 @@ class EnvironmentImportConfirmView(APIView):
                             else plaintext
                         )
                         variable.save(update_fields=['value', 'updated_at'])
+                        version = create_variable_version(
+                            variable=variable,
+                            action=EnvironmentVariableVersion.Action.UPDATED,
+                            actor=request.user,
+                            plaintext=plaintext,
+                        )
                         record_variable_audit(
                             action='updated',
                             actor=request.user,
@@ -440,6 +511,7 @@ class EnvironmentImportConfirmView(APIView):
                             value_after=variable.value,
                             sensitivity_before_for_value=variable.sensitivity,
                             sensitivity_after_for_value=variable.sensitivity,
+                            extra_changes={'version': {'before': None, 'after': version.version_number}},
                         )
                         updated += 1
         except EncryptionError as encryption_error:

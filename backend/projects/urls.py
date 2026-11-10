@@ -15,6 +15,13 @@ from .invitation_views import (
     InvitationAcceptView, InvitationInspectView,
     ProjectInvitationDetailView, ProjectInvitationListCreateView,
 )
+from .version_views import (
+    EnvironmentVariableVersionCompareView,
+    EnvironmentVariableVersionDetailView,
+    EnvironmentVariableVersionListView,
+    EnvironmentVariableVersionRestoreView,
+    EnvironmentVariableVersionValueView,
+)
 
 
 urlpatterns = [
@@ -62,5 +69,30 @@ urlpatterns = [
         '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/reveal/',
         EnvironmentVariableRevealView.as_view(),
         name='environment-variable-reveal',
+    ),
+    path(
+        '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/versions/',
+        EnvironmentVariableVersionListView.as_view(),
+        name='environment-variable-versions',
+    ),
+    path(
+        '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/versions/compare/',
+        EnvironmentVariableVersionCompareView.as_view(),
+        name='environment-variable-version-compare',
+    ),
+    path(
+        '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/versions/<int:version_id>/',
+        EnvironmentVariableVersionDetailView.as_view(),
+        name='environment-variable-version-detail',
+    ),
+    path(
+        '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/versions/<int:version_id>/value/',
+        EnvironmentVariableVersionValueView.as_view(),
+        name='environment-variable-version-value',
+    ),
+    path(
+        '<int:project_id>/environments/<int:environment_id>/variables/<int:variable_id>/versions/<int:version_id>/restore/',
+        EnvironmentVariableVersionRestoreView.as_view(),
+        name='environment-variable-version-restore',
     ),
 ]

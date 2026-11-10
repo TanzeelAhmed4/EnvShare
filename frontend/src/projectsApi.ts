@@ -36,6 +36,24 @@ export type ProjectVariable = {
   updated_at: string;
 };
 
+export type VariableVersion = {
+  id: number;
+  variable_id_snapshot: number;
+  variable_key: string;
+  version_number: number;
+  sensitivity: 'standard' | 'sensitive';
+  action: 'created' | 'updated' | 'restored' | 'deleted';
+  actor_username: string;
+  created_at: string;
+};
+export type VariableVersionComparison = {
+  left_version: number;
+  right_version: number;
+  sensitive: boolean;
+  different: boolean;
+  diff?: string[];
+};
+
 export type ImportPreviewItem = {
   classification: 'New' | 'Update' | 'Unchanged';
   key: string;
@@ -58,7 +76,7 @@ export type AuditEvent = {
   environment_label: string;
   variable_id: number;
   variable_key: string;
-  action: 'created' | 'updated' | 'deleted' | 'revealed';
+  action: 'created' | 'updated' | 'deleted' | 'revealed' | 'restored' | 'version_accessed' | 'version_compared';
   action_label: string;
   actor: string;
   changes: { key?: AuditChange; sensitivity?: AuditChange; value?: AuditChange };
@@ -110,6 +128,20 @@ export const projectsApi = {
   environments: (projectId: number) => apiRequest<Environment[]>(`/projects/${projectId}/environments/`),
   variables: (projectId: number, environmentId: number) => apiRequest<ProjectVariable[]>(
     `/projects/${projectId}/environments/${environmentId}/variables/`,
+  ),
+  variableVersions: (projectId: number, environmentId: number, variableId: number) => apiRequest<VariableVersion[]>(
+    `/projects/${projectId}/environments/${environmentId}/variables/${variableId}/versions/`,
+  ),
+  variableVersionValue: (projectId: number, environmentId: number, variableId: number, versionId: number) => apiRequest<{
+    version_number: number; key: string; sensitivity: 'standard' | 'sensitive'; value: string;
+  }>(`/projects/${projectId}/environments/${environmentId}/variables/${variableId}/versions/${versionId}/value/`),
+  compareVariableVersions: (projectId: number, environmentId: number, variableId: number, leftVersionId: number, rightVersionId: number) =>
+    apiRequest<VariableVersionComparison>(`/projects/${projectId}/environments/${environmentId}/variables/${variableId}/versions/compare/`, {
+      method: 'POST', body: JSON.stringify({ left_version_id: leftVersionId, right_version_id: rightVersionId }),
+    }),
+  restoreVariableVersion: (projectId: number, environmentId: number, variableId: number, versionId: number) => apiRequest<ProjectVariable>(
+    `/projects/${projectId}/environments/${environmentId}/variables/${variableId}/versions/${versionId}/restore/`,
+    { method: 'POST', body: JSON.stringify({}) },
   ),
   createVariable: (projectId: number, environmentId: number, data: Partial<ProjectVariable>) =>
     apiRequest<ProjectVariable>(`/projects/${projectId}/environments/${environmentId}/variables/`, {

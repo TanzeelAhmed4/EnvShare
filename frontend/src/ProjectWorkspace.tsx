@@ -211,6 +211,7 @@ export default function ProjectWorkspace({ user, onLogout }: Props) {
           </article>}
           <EnvironmentVariables
             projectId={activeProject.id}
+            canManageHistory={activeProject.my_role !== 'member'}
             onAuditChange={() => setAuditRefresh((version) => version + 1)}
             environments={environments}
             selectedEnvironmentId={activeEnvironmentId}

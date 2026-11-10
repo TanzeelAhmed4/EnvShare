@@ -1,16 +1,17 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Eye, EyeOff, KeyRound, LoaderCircle, LockKeyhole, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
-import { Environment, ImportPreview, ProjectVariable, projectsApi } from './projectsApi';
+import { Eye, EyeOff, GitCompare, History, KeyRound, LoaderCircle, LockKeyhole, Pencil, Plus, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react';
+import { Environment, ImportPreview, ProjectVariable, VariableVersion, VariableVersionComparison, projectsApi } from './projectsApi';
 
 type Props = {
   projectId: number;
+  canManageHistory: boolean;
   onAuditChange: () => void;
   environments: Environment[];
   selectedEnvironmentId: number | null;
   onSelectEnvironment: (id: number) => void;
 };
 
-export default function EnvironmentVariables({ projectId, onAuditChange, environments, selectedEnvironmentId, onSelectEnvironment }: Props) {
+export default function EnvironmentVariables({ projectId, canManageHistory, onAuditChange, environments, selectedEnvironmentId, onSelectEnvironment }: Props) {
   const [variables, setVariables] = useState<ProjectVariable[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -25,6 +26,13 @@ export default function EnvironmentVariables({ projectId, onAuditChange, environ
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [importClassifications, setImportClassifications] = useState<Record<string, 'standard' | 'sensitive'>>({});
   const [importNotice, setImportNotice] = useState('');
+  const [historyVariable, setHistoryVariable] = useState<ProjectVariable | null>(null);
+  const [historyVersions, setHistoryVersions] = useState<VariableVersion[]>([]);
+  const [selectedVersionIds, setSelectedVersionIds] = useState<number[]>([]);
+  const [historyComparison, setHistoryComparison] = useState<VariableVersionComparison | null>(null);
+  const [historicalValue, setHistoricalValue] = useState<Record<number, string>>({});
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
 
   useEffect(() => {
     if (!selectedEnvironmentId) return;
@@ -118,6 +126,54 @@ export default function EnvironmentVariables({ projectId, onAuditChange, environ
     }
   }
 
+  async function openHistory(variable: ProjectVariable) {
+    if (!selectedEnvironmentId) return;
+    setHistoryVariable(variable); setHistoryVersions([]); setSelectedVersionIds([]);
+    setHistoryComparison(null); setHistoricalValue({}); setHistoryError(''); setHistoryLoading(true);
+    try { setHistoryVersions(await projectsApi.variableVersions(projectId, selectedEnvironmentId, variable.id)); }
+    catch (cause) { setHistoryError(cause instanceof Error ? cause.message : 'Could not load version history.'); }
+    finally { setHistoryLoading(false); }
+  }
+
+  function selectVersion(versionId: number, checked: boolean) {
+    setHistoryComparison(null);
+    setSelectedVersionIds((current) => {
+      if (!checked) return current.filter((id) => id !== versionId);
+      return [...current.filter((id) => id !== versionId), versionId].slice(-2);
+    });
+  }
+
+  async function compareHistory() {
+    if (!historyVariable || !selectedEnvironmentId || selectedVersionIds.length !== 2) return;
+    setHistoryError('');
+    try {
+      setHistoryComparison(await projectsApi.compareVariableVersions(
+        projectId, selectedEnvironmentId, historyVariable.id, selectedVersionIds[0], selectedVersionIds[1],
+      ));
+      onAuditChange();
+    } catch (cause) { setHistoryError(cause instanceof Error ? cause.message : 'Could not compare these versions.'); }
+  }
+
+  async function loadHistoricalValue(version: VariableVersion) {
+    if (!historyVariable || !selectedEnvironmentId) return;
+    setHistoryError('');
+    try {
+      const result = await projectsApi.variableVersionValue(projectId, selectedEnvironmentId, historyVariable.id, version.id);
+      setHistoricalValue((current) => ({ ...current, [version.id]: result.value }));
+      if (version.sensitivity === 'sensitive') onAuditChange();
+    } catch (cause) { setHistoryError(cause instanceof Error ? cause.message : 'Could not retrieve this historical value.'); }
+  }
+
+  async function restoreHistory(version: VariableVersion) {
+    if (!historyVariable || !selectedEnvironmentId || !window.confirm(`Restore ${version.variable_key} from version ${version.version_number}?`)) return;
+    setBusy(true); setHistoryError('');
+    try {
+      await projectsApi.restoreVariableVersion(projectId, selectedEnvironmentId, historyVariable.id, version.id);
+      setHistoryVariable(null); setReload((value) => value + 1); onAuditChange();
+    } catch (cause) { setHistoryError(cause instanceof Error ? cause.message : 'Could not restore this version.'); }
+    finally { setBusy(false); }
+  }
+
   function openImport() {
     setImportContent('');
     setImportPreview(null);
@@ -185,10 +241,32 @@ export default function EnvironmentVariables({ projectId, onAuditChange, environ
           <td><code>{variable.key}</code></td>
           <td><div className="variable-value-cell"><span className={variable.sensitivity === 'sensitive' && !isRevealed ? 'masked-value' : 'variable-value'}>{isRevealed ? revealed[variable.id] : variable.value}</span>{variable.sensitivity === 'sensitive' && <button className="reveal-button" onClick={() => void toggleReveal(variable)} aria-label={isRevealed ? `Hide ${variable.key}` : `Reveal ${variable.key}`} title={isRevealed ? 'Hide value' : 'Reveal value'}>{isRevealed ? <EyeOff size={15} /> : <Eye size={15} />}</button>}</div></td>
           <td><span className={`classification-pill ${variable.sensitivity}`}>{variable.sensitivity === 'sensitive' ? <LockKeyhole size={12} /> : <ShieldCheck size={12} />}{variable.sensitivity === 'sensitive' ? 'Sensitive' : 'Standard'}</span></td>
-          <td><div className="variable-actions"><button onClick={() => startEdit(variable)} aria-label={`Edit ${variable.key}`} title="Edit"><Pencil size={14} /></button><button onClick={() => void deleteVariable(variable)} disabled={busy} aria-label={`Delete ${variable.key}`} title="Delete"><Trash2 size={14} /></button></div></td>
+          <td><div className="variable-actions"><button onClick={() => void openHistory(variable)} aria-label={`History for ${variable.key}`} title="Version history"><History size={14} /></button><button onClick={() => startEdit(variable)} aria-label={`Edit ${variable.key}`} title="Edit"><Pencil size={14} /></button><button onClick={() => void deleteVariable(variable)} disabled={busy} aria-label={`Delete ${variable.key}`} title="Delete"><Trash2 size={14} /></button></div></td>
         </tr>;
       })}</tbody></table></div>}
 
+      {historyVariable && <div className="modal-backdrop" role="presentation"><section className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="variable-history-title">
+        <button className="modal-close" onClick={() => setHistoryVariable(null)} aria-label="Close version history">×</button>
+        <span className="form-eyebrow">VARIABLE HISTORY</span><h2 id="variable-history-title">{historyVariable.key} versions</h2>
+        <p className="modal-copy">Values are encrypted in storage. Sensitive content requires an authorized reveal.</p>
+        {historyError && <p className="workspace-alert" role="alert">{historyError}</p>}
+        {historyLoading ? <p role="status">Loading versions…</p> : historyVersions.length === 0 ? <p className="import-empty">No versions recorded yet.</p> : <div className="import-preview-list">
+          {historyVersions.map((version, index) => <article className="import-preview-row" key={version.id}>
+            <div className="import-preview-top"><label><input type="checkbox" checked={selectedVersionIds.includes(version.id)} onChange={(event) => selectVersion(version.id, event.target.checked)} /> Version {version.version_number}</label>
+              {index === 0 && <span className="import-classification unchanged">Current</span>}
+              <span className={`import-classification ${version.sensitivity}`}>{version.sensitivity}</span>
+            </div>
+            <p className="audit-context">{version.action} by {version.actor_username} · {new Date(version.created_at).toLocaleString()} · key {version.variable_key}</p>
+            <div className="modal-actions">
+              {(!version.sensitivity || version.sensitivity === 'standard' || canManageHistory) && <button className="workspace-secondary" onClick={() => void loadHistoricalValue(version)}>{version.sensitivity === 'sensitive' ? 'Reveal historical value' : 'View value'}</button>}
+              {canManageHistory && index !== 0 && <button className="workspace-secondary" onClick={() => void restoreHistory(version)} disabled={busy}><RotateCcw size={14} /> Restore</button>}
+            </div>
+            {Object.prototype.hasOwnProperty.call(historicalValue, version.id) && <pre className="import-source">{historicalValue[version.id]}</pre>}
+          </article>)}
+        </div>}
+        <div className="modal-actions"><button className="workspace-secondary" onClick={() => void compareHistory()} disabled={selectedVersionIds.length !== 2 || historyLoading || (selectedVersionIds.some((id) => historyVersions.find((item) => item.id === id)?.sensitivity === 'sensitive') && !canManageHistory)}><GitCompare size={15} /> Compare selected</button><button className="workspace-secondary" onClick={() => setHistoryVariable(null)}>Close</button></div>
+        {historyComparison && <div className="import-preview"><h3>Comparison: v{historyComparison.left_version} → v{historyComparison.right_version}</h3>{historyComparison.sensitive ? <p>{historyComparison.different ? 'Sensitive values differ. Their contents are not shown.' : 'Sensitive values are identical. Their contents are not shown.'}</p> : <pre className="import-source">{historyComparison.diff?.join('\n') || 'No differences.'}</pre>}</div>}
+      </section></div>}
       {importOpen && <div className="modal-backdrop" role="presentation"><section className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="env-import-title"><button className="modal-close" onClick={() => setImportOpen(false)} aria-label="Close import">×</button><span className="form-eyebrow">BULK CONFIGURATION</span><h2 id="env-import-title">Import .env values</h2><p className="modal-copy">Preview changes for {activeEnvironment?.label ?? 'this environment'}. Nothing is saved until you confirm.</p><label className="import-label" htmlFor="env-import-content">Paste .env content</label><textarea id="env-import-content" className="import-source" rows={7} spellCheck={false} placeholder={'API_URL=https://example.com\nFEATURE_FLAG="enabled"'} value={importContent} onChange={(event) => { setImportContent(event.target.value); setImportPreview(null); setImportClassifications({}); }} />
         {importPreview && <div className="import-preview" aria-live="polite"><h3>Import preview <span>{importPreview.preview.length} entries</span></h3>{importPreview.invalid_lines.length > 0 && <div className="import-invalid" role="alert"><strong>Fix these lines before saving</strong>{importPreview.invalid_lines.map((item) => <p key={`${item.line}-${item.message}`}>Line {item.line}: {item.message}</p>)}</div>}{importPreview.preview.length === 0 ? <p className="import-empty">No valid variable entries found.</p> : <div className="import-preview-list">{importPreview.preview.map((item) => { const classification = importClassifications[item.key]; const newValue = item.classification === 'New' && classification !== 'standard' ? '••••••••' : item.new_value; return <article className="import-preview-row" key={item.key}><div className="import-preview-top"><code>{item.key}</code><span className={`import-classification ${item.classification.toLowerCase()}`}>{item.classification}</span></div>{item.classification === 'Update' ? <div className="import-values"><div><small>Old value</small><code>{item.old_value}</code></div><div><small>New value</small><code>{item.new_value}</code></div></div> : item.classification === 'New' ? <div className="import-new-value"><code>{newValue}</code><label>Classification<select value={classification ?? ''} onChange={(event) => { const value = event.target.value as 'standard' | 'sensitive'; const next = { ...importClassifications, [item.key]: value }; setImportClassifications(next); void previewImport(next); }}><option value="" disabled>Choose…</option><option value="standard">Standard</option><option value="sensitive">Sensitive</option></select></label></div> : <div className="import-unchanged-value"><small>Unchanged</small><code>{item.new_value}</code></div>}</article>; })}</div>}</div>}
         {error && <p className="form-error" role="alert">{error}</p>}

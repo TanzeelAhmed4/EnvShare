@@ -19,6 +19,7 @@ def record_variable_audit(
     value_after=_MISSING,
     sensitivity_before_for_value=None,
     sensitivity_after_for_value=None,
+    extra_changes=None,
 ):
     """Persist a variable event while redacting values if either state is Sensitive."""
     project = environment.project
@@ -52,6 +53,9 @@ def record_variable_audit(
         before = None if value_before is _MISSING else REDACTED if protected else value_before
         after = None if value_after is _MISSING else REDACTED if protected else value_after
         changes['value'] = {'before': before, 'after': after}
+
+    if extra_changes:
+        changes.update(extra_changes)
 
     return EnvironmentVariableAuditEvent.objects.create(
         project=project,
