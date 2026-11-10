@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from .models import Project, ProjectMembership
+from .permissions import project_role
 
 
 User = get_user_model()
@@ -11,6 +12,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     creator_id = serializers.IntegerField(read_only=True)
     creator_username = serializers.CharField(source='creator.username', read_only=True)
     member_count = serializers.SerializerMethodField()
+    my_role = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -21,6 +23,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'creator_id',
             'creator_username',
             'member_count',
+            'my_role',
             'created_at',
             'updated_at',
         )
@@ -31,9 +34,14 @@ class ProjectSerializer(serializers.ModelSerializer):
             return project.member_count
         return project.memberships.count()
 
+    def get_my_role(self, project):
+        request = self.context.get('request')
+        return project_role(request.user, project) if request else None
+
 
 class AddProjectMemberSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
+    role = serializers.ChoiceField(choices=ProjectMembership.Role.choices, default=ProjectMembership.Role.MEMBER)
 
     def validate_username(self, value):
         try:
@@ -43,7 +51,7 @@ class AddProjectMemberSerializer(serializers.Serializer):
 
         project = self.context['project']
         if user.pk == project.creator_id:
-            raise serializers.ValidationError('The project creator is already an owner.')
+            raise serializers.ValidationError('The project creator cannot be managed as a member.')
         if ProjectMembership.objects.filter(project=project, user=user).exists():
             raise serializers.ValidationError('That user is already a project member.')
         self.user = user
@@ -59,3 +67,7 @@ class ProjectMembershipSerializer(serializers.ModelSerializer):
         model = ProjectMembership
         fields = ('user_id', 'username', 'email', 'role', 'created_at')
         read_only_fields = fields
+
+
+class ChangeProjectMemberRoleSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=ProjectMembership.Role.choices)

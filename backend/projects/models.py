@@ -22,6 +22,8 @@ class Project(models.Model):
 
 class ProjectMembership(models.Model):
     class Role(models.TextChoices):
+        ADMIN = 'admin', 'Admin'
+        MANAGER = 'manager', 'Manager'
         MEMBER = 'member', 'Member'
 
     project = models.ForeignKey(
@@ -53,6 +55,46 @@ class ProjectMembership(models.Model):
 
     def __str__(self):
         return f'{self.user} on {self.project} ({self.get_role_display()})'
+
+
+class ProjectInvitation(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='invitations')
+    invited_email = models.EmailField(max_length=254)
+    token_hash = models.CharField(max_length=64, unique=True)
+    role = models.CharField(max_length=16, choices=ProjectMembership.Role.choices)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='created_project_invitations')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    max_uses = models.PositiveIntegerField(default=1)
+    use_count = models.PositiveIntegerField(default=0)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=('project', 'expires_at'), name='invite_project_exp_idx')]
+        constraints = [models.CheckConstraint(condition=models.Q(max_uses__gte=1), name='invite_max_uses_positive')]
+
+
+class ProjectAccessAuditEvent(models.Model):
+    class Action(models.TextChoices):
+        INVITATION_CREATED = 'invitation_created', 'Invitation created'
+        INVITATION_REVOKED = 'invitation_revoked', 'Invitation revoked'
+        INVITATION_ACCEPTED = 'invitation_accepted', 'Invitation accepted'
+        ROLE_CHANGED = 'role_changed', 'Membership role changed'
+        MEMBER_REMOVED = 'member_removed', 'Member removed'
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='access_events')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    actor_username = models.CharField(max_length=150)
+    action = models.CharField(max_length=32, choices=Action.choices)
+    target_email = models.EmailField(max_length=254, blank=True)
+    target_username = models.CharField(max_length=150, blank=True)
+    role_before = models.CharField(max_length=16, blank=True)
+    role_after = models.CharField(max_length=16, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-created_at', '-pk')
+        indexes = [models.Index(fields=('project', '-created_at'), name='access_audit_proj_time_idx')]
 
 
 class Environment(models.Model):

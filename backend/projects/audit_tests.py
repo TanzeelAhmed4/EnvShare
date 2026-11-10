@@ -21,7 +21,7 @@ class EnvironmentVariableAuditTests(TestCase):
         self.member = User.objects.create_user(username='audit-member', password='Strong-Password-882!')
         self.outsider = User.objects.create_user(username='audit-outsider', password='Strong-Password-882!')
         self.project = Project.objects.create(name='Audit project', creator=self.owner)
-        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.owner)
+        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.owner, role=ProjectMembership.Role.MANAGER)
         self.environment = self.project.environments.get(name=Environment.Name.DEVELOPMENT)
         self.client = APIClient()
 

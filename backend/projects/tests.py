@@ -78,13 +78,13 @@ class ProjectApiTests(TestCase):
 
         response = self.client.post(
             f'/api/projects/{self.project.pk}/members/',
-            {'username': self.member.username},
+            {'username': self.member.username, 'role': ProjectMembership.Role.MANAGER},
             format='json',
         )
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()['user_id'], self.member.pk)
-        self.assertEqual(response.json()['role'], ProjectMembership.Role.MEMBER)
+        self.assertEqual(response.json()['role'], ProjectMembership.Role.MANAGER)
         membership = ProjectMembership.objects.get(project=self.project, user=self.member)
         self.assertEqual(membership.added_by, self.creator)
 
@@ -123,7 +123,7 @@ class ProjectApiTests(TestCase):
         self.assertEqual(self_response.status_code, 400)
         self.assertEqual(unknown_response.status_code, 400)
 
-        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator)
+        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator, role=ProjectMembership.Role.MANAGER)
         duplicate_response = self.client.post(url, {'username': 'MEMBER'}, format='json')
         self.assertEqual(duplicate_response.status_code, 400)
         self.assertIn('username', duplicate_response.json())
@@ -147,7 +147,7 @@ class ProjectApiTests(TestCase):
         self.assertFalse(ProjectMembership.objects.filter(project=self.project).exists())
 
     def test_members_cannot_add_or_remove_other_members(self):
-        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator)
+        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator, role=ProjectMembership.Role.MANAGER)
         ProjectMembership.objects.create(project=self.project, user=self.outsider, added_by=self.creator)
         self.authenticate_as(self.member)
 
@@ -165,7 +165,7 @@ class ProjectApiTests(TestCase):
         self.assertTrue(ProjectMembership.objects.filter(project=self.project, user=self.outsider).exists())
 
     def test_creator_and_members_can_edit_project_data_but_outsiders_cannot(self):
-        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator)
+        ProjectMembership.objects.create(project=self.project, user=self.member, added_by=self.creator, role=ProjectMembership.Role.MANAGER)
 
         self.assertTrue(can_edit_project_data(self.creator, self.project))
         self.assertTrue(can_edit_project_data(self.member, self.project))
@@ -177,3 +177,6 @@ from .environment_tests import EnvironmentVariableApiTests  # noqa: F401,E402
 from .env_import_tests import EnvImportApiTests, EnvImportParserTests  # noqa: F401,E402
 from .audit_tests import EnvironmentVariableAuditTests  # noqa: F401,E402
 from .encryption_tests import EncryptionConfigurationTests  # noqa: F401,E402
+from .role_invitation_tests import ProjectRoleAndInvitationTests  # noqa: F401,E402
+from .role_invitation_tests import ExistingMembershipMigrationTests  # noqa: F401,E402
+from .role_invitation_tests import ConcurrentInvitationClaimTests  # noqa: F401,E402

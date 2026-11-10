@@ -17,11 +17,15 @@ from .encryption import EncryptionError, decrypt_value, encrypt_value
 from .env_import import parse_env_content
 from .environment_serializers import EnvironmentSerializer, EnvironmentVariableSerializer
 from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent
+from .permissions import has_project_permission
 from .views import visible_projects_for
 
 
-def get_project_environment(request, project_id, environment_id=None):
+def get_project_environment(request, project_id, environment_id=None, permission='view_variables'):
     project = get_object_or_404(visible_projects_for(request.user), pk=project_id)
+    if not has_project_permission(request.user, project, permission):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('You do not have permission to perform this project action.')
     if environment_id is None:
         return project, None
     environment = get_object_or_404(Environment, pk=environment_id, project=project)
@@ -36,7 +40,7 @@ class ProjectEnvironmentListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id):
-        project, _ = get_project_environment(request, project_id)
+        project, _ = get_project_environment(request, project_id, permission='view_variables')
         environments = project.environments.order_by('pk')
         return Response(EnvironmentSerializer(environments, many=True).data)
 
@@ -45,7 +49,7 @@ class EnvironmentVariableListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'view_variables')
         variables = environment.variables.all()
         return Response(EnvironmentVariableSerializer(
             variables,
@@ -54,7 +58,7 @@ class EnvironmentVariableListCreateView(APIView):
         ).data)
 
     def post(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'create_variables')
         serializer = EnvironmentVariableSerializer(
             data=request.data,
             context={'environment': environment},
@@ -89,7 +93,7 @@ class EnvironmentVariableDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get_variable(self, request, project_id, environment_id, variable_id):
-        _project, environment = get_project_environment(request, project_id, environment_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'view_variables')
         variable = get_object_or_404(
             EnvironmentVariable,
             pk=variable_id,
@@ -105,7 +109,8 @@ class EnvironmentVariableDetailView(APIView):
         ).data)
 
     def patch(self, request, project_id, environment_id, variable_id):
-        environment, variable = self.get_variable(request, project_id, environment_id, variable_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'edit_variables')
+        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
         serializer = EnvironmentVariableSerializer(
             variable,
             data=request.data,
@@ -148,7 +153,8 @@ class EnvironmentVariableDetailView(APIView):
         ).data)
 
     def delete(self, request, project_id, environment_id, variable_id):
-        environment, variable = self.get_variable(request, project_id, environment_id, variable_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'delete_variables')
+        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
         with transaction.atomic():
             record_variable_audit(
                 action='deleted',
@@ -167,12 +173,8 @@ class EnvironmentVariableRevealView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, environment_id, variable_id):
-        environment, variable = EnvironmentVariableDetailView().get_variable(
-            request,
-            project_id,
-            environment_id,
-            variable_id,
-        )
+        _project, environment = get_project_environment(request, project_id, environment_id, 'reveal')
+        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
         if variable.sensitivity != EnvironmentVariable.Sensitivity.SENSITIVE:
             return Response(
                 {'detail': 'Only Sensitive variables have a reveal operation.'},
@@ -292,7 +294,7 @@ class EnvironmentImportPreviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'import')
         content, classifications, error = import_request_data(request)
         if error:
             return error
@@ -331,7 +333,7 @@ class EnvironmentImportConfirmView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id)
+        _project, environment = get_project_environment(request, project_id, environment_id, 'import')
         if request.data.get('confirm') is not True:
             return Response({'detail': 'Confirm the import after reviewing its preview.'}, status=400)
         content, classifications, error = import_request_data(request)

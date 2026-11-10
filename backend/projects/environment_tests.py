@@ -28,6 +28,7 @@ class EnvironmentVariableApiTests(TestCase):
             project=self.project,
             user=self.member,
             added_by=self.owner,
+            role=ProjectMembership.Role.MANAGER,
         )
         self.environments = list(self.project.environments.order_by('pk'))
         self.development = self.project.environments.get(name=Environment.Name.DEVELOPMENT)

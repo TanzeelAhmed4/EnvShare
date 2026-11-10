@@ -5,8 +5,10 @@ from rest_framework.views import APIView
 
 from django.shortcuts import get_object_or_404
 
-from .models import EnvironmentVariableAuditEvent
+from .models import EnvironmentVariableAuditEvent, ProjectAccessAuditEvent
 from .views import visible_projects_for
+from .permissions import has_project_permission
+from rest_framework.exceptions import PermissionDenied
 
 
 ENVIRONMENT_LABELS = {
@@ -39,5 +41,21 @@ class ProjectAuditHistoryView(APIView):
 
     def get(self, request, project_id):
         project = get_object_or_404(visible_projects_for(request.user), pk=project_id)
+        if not has_project_permission(request.user, project, 'view_audit'):
+            raise PermissionDenied('You do not have permission to view this project history.')
         events = EnvironmentVariableAuditEvent.objects.filter(project=project).order_by('-created_at', '-pk')
         return Response(EnvironmentVariableAuditSerializer(events, many=True).data)
+
+
+class ProjectAccessAuditHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, project_id):
+        project = get_object_or_404(visible_projects_for(request.user), pk=project_id)
+        if not has_project_permission(request.user, project, 'view_audit'):
+            raise PermissionDenied('You do not have permission to view this project history.')
+        events = ProjectAccessAuditEvent.objects.filter(project=project).values(
+            'id', 'actor_username', 'action', 'target_email', 'target_username',
+            'role_before', 'role_after', 'created_at',
+        )
+        return Response(list(events))

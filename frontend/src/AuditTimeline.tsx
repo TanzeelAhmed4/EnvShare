@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Clock3, History, LoaderCircle } from 'lucide-react';
-import { AuditChange, AuditEvent, projectsApi } from './projectsApi';
+import { AccessAuditEvent, AuditChange, AuditEvent, projectsApi } from './projectsApi';
 
 type Props = { projectId: number; refreshToken: number };
 const REDACTED = '[REDACTED]';
@@ -40,6 +40,24 @@ export default function AuditTimeline({ projectId, refreshToken }: Props) {
         const details = Object.entries(event.changes) as [keyof AuditEvent['changes'], AuditChange][];
         return <li className={`audit-event ${event.action}`} key={event.id}><span className="audit-marker" aria-hidden="true" /><article><div className="audit-event-top"><p><strong>{event.actor}</strong> {event.action} <code>{event.variable_key}</code></p><span className={`audit-action ${event.action}`}>{event.action_label}</span></div><p className="audit-context">{event.environment_label} environment</p>{details.length > 0 && <ul className="audit-changes" aria-label="Change details">{details.map(([field, change]) => <li key={field}>{changeText(field === 'value' ? 'Value' : field === 'sensitivity' ? 'Classification' : 'Key', change, event.action)}</li>)}</ul>}<time dateTime={event.created_at}><Clock3 size={12} />{new Date(event.created_at).toLocaleString()}</time></article></li>;
       })}</ol>}
+      <AccessHistory projectId={projectId} refreshToken={refreshToken} />
     </section>
   );
+}
+
+function AccessHistory({ projectId, refreshToken }: Props) {
+  const [events, setEvents] = useState<AccessAuditEvent[]>([]);
+  useEffect(() => {
+    let active = true;
+    projectsApi.accessAuditHistory(projectId).then((items) => { if (active) setEvents(items); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [projectId, refreshToken]);
+  if (events.length === 0) return null;
+  return <><h3>Team access history</h3><ol className="audit-timeline" aria-label="Project access history">{events.map((event) => <li className="audit-event" key={event.id}>
+    <span className="audit-marker" aria-hidden="true" /><article>
+      <div className="audit-event-top"><p><strong>{event.actor_username}</strong> {event.action.replace(/_/g, ' ')} {event.target_username || event.target_email}</p>
+        <span className="audit-action">{[event.role_before, event.role_after].filter(Boolean).join(' → ')}</span></div>
+      <time dateTime={event.created_at}><Clock3 size={12} />{new Date(event.created_at).toLocaleString()}</time>
+    </article>
+  </li>)}</ol></>;
 }

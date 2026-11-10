@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useState } from 'react';
 import { ArrowRight, Command, Eye, EyeOff, KeyRound, LoaderCircle, ShieldCheck } from 'lucide-react';
 import { authApi, AuthUser, onSessionExpired } from './authApi';
 import ProjectWorkspace from './ProjectWorkspace';
+import { projectsApi } from './projectsApi';
+import { clearInvitationFragment, invitationTokenFromHash } from './invitationLink';
 
 type AuthMode = 'login' | 'register';
 
@@ -12,6 +14,17 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [inviteToken, setInviteToken] = useState(() => invitationTokenFromHash(window.location.hash));
+
+  useEffect(() => {
+    if (inviteToken) clearInvitationFragment(window.history, window.location.pathname, window.location.search);
+  }, [inviteToken]);
+
+  useEffect(() => {
+    const update = () => setInviteToken(invitationTokenFromHash(window.location.hash));
+    window.addEventListener('hashchange', update);
+    return () => window.removeEventListener('hashchange', update);
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -53,6 +66,7 @@ export default function App() {
   const isRegister = mode === 'register';
 
   if (!loadingSession && user) {
+    if (inviteToken) return <InvitationAcceptance token={inviteToken} onDone={() => setInviteToken('')} />;
     return <ProjectWorkspace user={user} onLogout={() => { setUser(null); setMode('login'); }} />;
   }
 
@@ -84,6 +98,7 @@ export default function App() {
             <div className="auth-loading" role="status"><LoaderCircle className="spin" size={21} /> Checking your session…</div>
           ) : (
             <>
+              {inviteToken && <p className="workspace-notice">Sign in or create an account with the email address invited to the project. The invitation will be checked after sign-in.</p>}
               <span className="form-eyebrow">{isRegister ? 'GET STARTED' : 'WELCOME BACK'}</span>
               <h2 id="auth-title">{isRegister ? 'Create your account' : 'Sign in to EnvShare'}</h2>
               <p className="auth-subtitle">{isRegister ? 'Set up your account to get your team in sync.' : 'Pick up where your team left off.'}</p>
@@ -122,4 +137,20 @@ export default function App() {
       <footer className="auth-footer"><span>ENVSHARE <i>/</i> TEAM ENVIRONMENT MANAGER</span><span>Local workspace <b /></span></footer>
     </main>
   );
+}
+
+function InvitationAcceptance({ token, onDone }: { token: string; onDone: () => void }) {
+  const [details, setDetails] = useState<{ project_name: string; role: string; expires_at: string; uses_remaining: number } | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    projectsApi.inspectInvitation(token).then(setDetails).catch((cause) => setError(cause instanceof Error ? cause.message : 'Invitation is unavailable.'));
+  }, [token]);
+  async function accept() {
+    setBusy(true); setError('');
+    try { await projectsApi.acceptInvitation(token); onDone(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not accept this invitation.'); }
+    finally { setBusy(false); }
+  }
+  return <main className="auth-shell min-h-screen"><section className="auth-card" aria-labelledby="invite-title"><span className="form-eyebrow">PROJECT INVITATION</span><h2 id="invite-title">Join a project</h2>{details ? <><p className="auth-subtitle">You were invited to <strong>{details.project_name}</strong> as <strong>{details.role}</strong>.</p><p className="auth-subtitle">Expires {new Date(details.expires_at).toLocaleString()} · {details.uses_remaining} use(s) remaining</p><button className="auth-submit" onClick={() => void accept()} disabled={busy}>{busy ? 'Accepting…' : 'Accept invitation'}</button></> : <p className="auth-subtitle">{error || 'Checking invitation…'}</p>}{error && <p className="form-error" role="alert">{error}</p>}<button className="workspace-secondary" onClick={onDone}>Back to workspace</button></section></main>;
 }
