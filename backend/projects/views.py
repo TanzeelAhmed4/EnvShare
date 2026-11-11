@@ -1,5 +1,5 @@
 from django.db.models import Count, Q
-from django.db import transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied
@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Project, ProjectAccessAuditEvent, ProjectMembership
+from .write_locks import lock_project_for_write
 from .permissions import (
     IsProjectCollaborator,
     can_access_project,
@@ -39,7 +40,12 @@ class ProjectListCreateView(generics.ListCreateAPIView):
         )
 
     def perform_create(self, serializer):
-        serializer.save(creator=self.request.user)
+        with transaction.atomic():
+            project = serializer.save(creator=self.request.user)
+            ProjectAccessAuditEvent.objects.create(
+                project=project, actor=self.request.user, actor_username=self.request.user.get_username(),
+                action=ProjectAccessAuditEvent.Action.PROJECT_CREATED,
+            )
 
 
 class ProjectDetailView(generics.RetrieveAPIView):
@@ -82,20 +88,32 @@ class ProjectMembersView(APIView):
             raise PermissionDenied('You cannot assign that project role.')
         if serializer.user.pk == request.user.pk and role in (ProjectMembership.Role.ADMIN, ProjectMembership.Role.MANAGER):
             raise PermissionDenied('You cannot promote yourself.')
-        with transaction.atomic():
-            membership = ProjectMembership.objects.create(
-                project=project,
-                user=serializer.user,
-                added_by=request.user,
-                role=role,
-            )
-            project.save(update_fields=('updated_at',))
-            ProjectAccessAuditEvent.objects.create(
-                project=project, actor=request.user, actor_username=request.user.get_username(),
-                action=ProjectAccessAuditEvent.Action.ROLE_CHANGED,
-                target_email=serializer.user.email.strip().lower(), target_username=serializer.user.get_username(),
-                role_after=role,
-            )
+        try:
+            with transaction.atomic():
+                lock_project_for_write(project.pk)
+                if not has_project_permission(request.user, project, 'manage_members') or not has_project_permission(
+                    request.user, project, assign_permission,
+                ):
+                    raise PermissionDenied('You cannot assign that project role.')
+                if ProjectMembership.objects.filter(project=project, user=serializer.user).exists():
+                    return Response({'username': ['That user is already a project member.']}, status=400)
+                membership = ProjectMembership.objects.create(
+                    project=project,
+                    user=serializer.user,
+                    added_by=request.user,
+                    role=role,
+                )
+                project.save(update_fields=('updated_at',))
+                ProjectAccessAuditEvent.objects.create(
+                    project=project, actor=request.user, actor_username=request.user.get_username(),
+                    action=ProjectAccessAuditEvent.Action.MEMBERSHIP_ADDED,
+                    target_email=serializer.user.email.strip().lower(), target_username=serializer.user.get_username(),
+                    role_after=role,
+                )
+        except IntegrityError:
+            return Response({'detail': 'Membership changed concurrently. Refresh and try again.'}, status=409)
+        except OperationalError:
+            return Response({'detail': 'Membership change conflicted with another write. Try again.'}, status=409)
         return Response(
             ProjectMembershipSerializer(membership).data,
             status=status.HTTP_201_CREATED,
@@ -120,15 +138,26 @@ class ProjectMemberDetailView(APIView):
         )
         if not can_manage_membership(request.user, project, membership):
             raise PermissionDenied('Only the project owner can manage Admin memberships.')
-        with transaction.atomic():
-            ProjectAccessAuditEvent.objects.create(
-                project=project, actor=request.user, actor_username=request.user.get_username(),
-                action=ProjectAccessAuditEvent.Action.MEMBER_REMOVED,
-                target_email=membership.user.email.strip().lower(), target_username=membership.user.get_username(),
-                role_before=membership.role,
-            )
-            membership.delete()
-            project.save(update_fields=('updated_at',))
+        try:
+            with transaction.atomic():
+                lock_project_for_write(project.pk)
+                membership = get_object_or_404(
+                    ProjectMembership.objects.select_for_update(), project=project, user_id=user_id,
+                )
+                if not can_manage_membership(request.user, project, membership):
+                    raise PermissionDenied('Only the project owner can manage Admin memberships.')
+                if not has_project_permission(request.user, project, 'manage_members'):
+                    raise PermissionDenied('You do not have permission to manage project members.')
+                ProjectAccessAuditEvent.objects.create(
+                    project=project, actor=request.user, actor_username=request.user.get_username(),
+                    action=ProjectAccessAuditEvent.Action.MEMBER_REMOVED,
+                    target_email=membership.user.email.strip().lower(), target_username=membership.user.get_username(),
+                    role_before=membership.role,
+                )
+                membership.delete()
+                project.save(update_fields=('updated_at',))
+        except OperationalError:
+            return Response({'detail': 'Membership removal conflicted with another write. Try again.'}, status=409)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def patch(self, request, project_id, user_id):
@@ -149,17 +178,32 @@ class ProjectMemberDetailView(APIView):
             raise PermissionDenied('You cannot assign that project role.')
         if membership.user_id == request.user.pk and new_role in (ProjectMembership.Role.ADMIN, ProjectMembership.Role.MANAGER):
             raise PermissionDenied('You cannot promote yourself.')
-        old_role = membership.role
-        if old_role != new_role:
+        try:
             with transaction.atomic():
-                membership.role = new_role
-                membership.save(update_fields=('role',))
-                ProjectAccessAuditEvent.objects.create(
-                    project=project, actor=request.user, actor_username=request.user.get_username(),
-                    action=ProjectAccessAuditEvent.Action.ROLE_CHANGED,
-                    target_email=membership.user.email.strip().lower(), target_username=membership.user.get_username(),
-                    role_before=old_role, role_after=new_role,
+                lock_project_for_write(project.pk)
+                membership = get_object_or_404(
+                    ProjectMembership.objects.select_for_update().select_related('user'),
+                    project=project,
+                    user_id=user_id,
                 )
+                if not can_manage_membership(request.user, project, membership):
+                    raise PermissionDenied('Only the project owner can manage Admin memberships.')
+                if not has_project_permission(request.user, project, 'manage_members') or not has_project_permission(
+                    request.user, project, 'assign_' + new_role,
+                ):
+                    raise PermissionDenied('You cannot assign that project role.')
+                old_role = membership.role
+                if old_role != new_role:
+                    membership.role = new_role
+                    membership.save(update_fields=('role',))
+                    ProjectAccessAuditEvent.objects.create(
+                        project=project, actor=request.user, actor_username=request.user.get_username(),
+                        action=ProjectAccessAuditEvent.Action.ROLE_CHANGED,
+                        target_email=membership.user.email.strip().lower(), target_username=membership.user.get_username(),
+                        role_before=old_role, role_after=new_role,
+                    )
+        except OperationalError:
+            return Response({'detail': 'Role change conflicted with another write. Try again.'}, status=409)
         return Response(ProjectMembershipSerializer(membership).data)
 
 
@@ -170,5 +214,10 @@ class ProjectDeleteView(APIView):
         project = get_object_or_404(visible_projects_for(request.user), pk=project_id)
         if not has_project_permission(request.user, project, 'delete_project'):
             raise PermissionDenied('Only the project owner can delete this project.')
-        project.delete()
+        try:
+            with transaction.atomic():
+                lock_project_for_write(project.pk)
+                project.delete()
+        except OperationalError:
+            return Response({'detail': 'Project deletion conflicted with another write. Try again.'}, status=409)
         return Response(status=status.HTTP_204_NO_CONTENT)

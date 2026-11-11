@@ -1,40 +1,43 @@
-# EnvShare AI agent handoff
+# EnvShare agent handoff
 
-## Read this before making changes
+## Working-tree safeguards
 
-Before editing, inspect the current workspace, this handoff, README, relevant source, migrations, tests, Git status, and applicable instructions. Preserve the current local database, migration history, custom `accounts.User`, and existing encryption key. Do not reset the database, regenerate/replace the key, expose secrets, or alter unrelated files. Add migrations only when needed and never rewrite an applied migration. Deployment, staging, committing, and pushing require separate explicit authorization.
+This repository contains substantial uncommitted Batch 3 and Batch 4 work. Inspect `git status` and the relevant diff before changing anything. Preserve the current database, migration history, custom `accounts.User`, and existing encryption key. Do not reset, revert, stash, clean, or overwrite unrelated work. Never expose secrets, Sensitive values, tokens, passwords, or private user data. Staging, committing, pushing, and deployment require explicit authorization.
 
-EnvShare is a local course project, not a production-ready service. The original course requirements remain the product boundary: account sessions; projects and registered-user sharing; Development, Staging, Production; Standard/Sensitive key-value variables; encrypted Sensitive storage and authorized reveal; `.env` preview/confirmation; variable audit history; secure password handling; and a usable frontend.
+## Project state and layout
 
-## Stack and paths
+EnvShare is a React/TypeScript frontend with a Django REST Framework backend. SQLite is the local default; PostgreSQL is configurable and required by production settings. Production cache uses Redis. Source is under `frontend/src/`, `backend/accounts/`, `backend/projects/`, and `backend/config/`.
 
-- Backend: Django 6.1.3, Django REST Framework 3.18.3, SQLite, accounts and projects apps.
-- Existing Windows backend interpreter: `backend\.venv\Scripts\python.exe` (Django 6.1.3 verified). The root-level `backend.venv` path is absent.
-- Frontend: React 18, TypeScript 5.6, Vite 6.4.5; sources in `frontend/src/`, the current small test in `frontend/tests/`.
-- Read [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT_GUIDE.md](DEVELOPMENT_GUIDE.md), and [PROJECT_STATUS.md](PROJECT_STATUS.md) before relevant work.
+The current Windows checkout has a backend virtual environment at `backend\.venv` and Node dependencies at `frontend\node_modules`. The interpreter/runtime versions observed in this checkout are Python 3.14.4, Django 6.1.3, Node 24.18.0, and npm 11.16.0. See [Development guide](DEVELOPMENT_GUIDE.md) for commands.
 
-## Current implementation details
+## Implemented behavior
 
-Implemented behavior includes session/CSRF authentication, Argon2-preferred password hashing, case-insensitive login and uniqueness constraints, IP and per-normalized-username failed-login protection, owner/member project access, three environments, variable CRUD, AES-GCM Sensitive values, import preview and confirmation, and chronological audit history.
+- Cookie-backed session authentication, CSRF token retrieval, Argon2-preferred password hashing, registration/login throttling, and authentication audit events.
+- Project roles: Owner, Admin, Manager, and Member. The creator is the Owner. Only the Owner manages Admins; Admins may manage Managers and Members; Managers and Members cannot manage membership.
+- Development, Staging, and Production environments; Standard and Sensitive variables; AES-GCM encryption for current Sensitive values and all historical snapshots.
+- Variable history, compare, restore, and deletion snapshots; deleted-variable history is retained internally but is unavailable through regular API endpoints.
+- Single-use, email-bound invitations with hashed tokens, expiry, and transactional acceptance. Email delivery is not implemented.
+- Signed `.env` import preview/confirmation, audit history and server-side filters/pagination, project/environment-scoped write locking, and audit snapshot retention.
+- Environment-based production settings, guarded WSGI/ASGI entrypoints, PostgreSQL and Redis configuration, health endpoints, security headers, and structured redacted logs.
 
-Login limits are 5 requests/IP/minute and 5 failed passwords/normalized username per 15-minute window followed by a 60-second cooldown; registration is 5/IP/hour. The username failure cache key uses an HMAC digest. A successful login clears the failure state. The cooldown can be repeatedly triggered against a known account, creating a temporary denial-of-service risk. Cache is currently local-memory/process-local, not shared between workers.
+## Important security and data rules
 
-Sensitive reveal auditing is implemented in `backend/projects/environment_views.py`: only successful Sensitive reveals write action `revealed`; the audit event stores metadata with empty `changes`, before the API returns plaintext. The plaintext is not passed to the audit helper. Audit-write failure returns a generic 503 and withholds the value. `backend/projects/migrations/0004_reveal_audit_action.py` adds the model action choice after migration 0003. The frontend type includes `revealed`; its successful reveal handler invokes `onAuditChange`, which refreshes `AuditTimeline`; failure does not invoke it.
+- Enforce project membership and role permissions in backend views/helpers; frontend visibility is not an authorization boundary.
+- Do not put Sensitive plaintext in logs, audit rows, ordinary serializers, previews, or error messages. Successful Sensitive reveal is audited before plaintext is returned.
+- Standard current values are stored as plaintext. Standard and Sensitive historical snapshots are encrypted.
+- Historical AES-GCM context binds project, environment, variable, key, version, and classification. Current Sensitive value context binds environment and key.
+- Variable writes create encrypted history, so the process needs the stable `ENVSHARE_ENCRYPTION_KEY` before variable creation/import. Never replace it for an existing database; key rotation and recovery are not implemented.
+- SQLite is local/test default; production requires PostgreSQL and Redis. PostgreSQL row-lock behavior and Redis multi-worker behavior are not verified until tested against real services.
+- Audit APIs are read-only but records are not tamper-proof against database operators or exported to an independent append-only store.
+- Read [Production deployment](PRODUCTION_DEPLOYMENT.md) and [Backup and recovery](BACKUP_RECOVERY.md) before changing deployment guidance. The recovery procedures are documentation, not tested recovery evidence.
 
-Case-insensitive login resolves `username__iexact` to the stored username before Django authentication. Username and non-empty email uniqueness use `Lower` constraints. This avoids SQLite-only lookup SQL and is intended to improve PostgreSQL portability, but settings only configure SQLite and PostgreSQL behavior is not verified.
+## Verification record
 
-## Security and data invariants
+Latest recorded local verification:
 
-- Never print, copy, or expose `.env` values, passwords, tokens, encryption keys, Sensitive variable plaintext, or private user data. Do not inspect secret-bearing files through ordinary output commands.
-- Never put raw usernames or passwords in login-throttle cache keys. Keep IP request throttling separate from username failure cooldown state.
-- Sensitive plaintext must not enter audit rows, logs, error messages, ordinary serializers, or import previews. Reveal plaintext only after audit persistence succeeds.
-- Enforce project membership in backend views/permissions; frontend hiding is not authorization.
-- Keep variable writes and corresponding audits transactional. Preserve project deletion cascade semantics unless explicitly changed.
-- Preserve the existing encryption key. Rotation/recovery is not implemented.
-- Keep actual `.env`, database, virtual-environment, key, and build artifacts out of source changes.
+- Backend: 139 tests discovered, 134 passed, 5 PostgreSQL-specific tests skipped because no PostgreSQL service was available. A separate deletion-history regression test passed after its route assertions were expanded.
+- Frontend tests, TypeScript validation, Django checks, migration consistency, and `git diff --check` passed.
+- Vite production bundling passed in production mode and with `--mode development`, using temporary output directories. A missing API URL under the overridden mode failed validation as intended. The combined `npm run build` attempt in the sandbox stopped at Vite/esbuild `spawn EPERM`; TypeScript and Vite bundling were verified separately.
+- PostgreSQL concurrency and Redis shared-cache integrations remain pending. No deployment or recovery procedure has been certified.
 
-## Verification and reporting
-
-Use the exact Windows commands in the development guide. Distinguish current execution from historical reports. The latest available full backend result is 79 passing tests as reported by the independent security review; it was not rerun in the documentation inspection. Latest frontend tests (five assertions) and TypeScript check passed; the latest production build failed because esbuild hit `spawn EPERM`. The actual nested backend virtualenv imports Django 6.1.3, but backend checks were not rerun with it during the inspection. Do not claim a check passed unless it was run.
-
-No browser E2E suite exists. Production database setup, shared cache, key backup/recovery, HTTPS/deployment operations, and independent audit retention remain unresolved. Report files changed, checks actually run, errors/limitations, and discrepancies. Do not stage or commit unless separately asked.
+Refer to [Project status](PROJECT_STATUS.md) for current limits. Do not turn skipped tests into passing claims, and do not describe EnvShare as production-certified.

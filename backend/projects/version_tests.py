@@ -222,7 +222,24 @@ class EnvironmentVariableVersionTests(TestCase):
         self.assertEqual(version.action, 'deleted')
         self.assertNotIn(secret, version.encrypted_value)
         self.assertEqual(decrypt_historical_value(version), secret)
-        self.assertEqual(self.client.get(f'{self.variables_url()}{variable_id}/versions/').status_code, 404)
+        history_url = f'{self.variables_url()}{variable_id}/versions/'
+        self.assertEqual(self.client.get(history_url).status_code, 404)
+        self.assertEqual(self.client.get(f'{history_url}{version.pk}/').status_code, 404)
+        self.assertEqual(self.client.get(f'{history_url}{version.pk}/value/').status_code, 404)
+        self.assertEqual(self.client.post(f'{history_url}{version.pk}/restore/', {}, format='json').status_code, 404)
+        self.assertEqual(
+            self.client.post(
+                f'{history_url}compare/',
+                {'left_version_id': version.pk, 'right_version_id': version.pk}, format='json',
+            ).status_code,
+            404,
+        )
+        outsider = APIClient()
+        outsider.force_authenticate(self.outsider)
+        self.assertNotEqual(outsider.get(history_url).status_code, 200)
+        self.assertEqual(
+            EnvironmentVariableVersion.objects.filter(variable_id_snapshot=variable_id).count(), 2,
+        )
 
     def test_history_encryption_failure_rolls_back_standard_variable_creation(self):
         self.authenticate(self.owner)

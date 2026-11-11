@@ -20,6 +20,7 @@ from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from .serializers import CurrentUserSerializer, LoginSerializer, RegistrationSerializer
+from .models import AuthenticationAuditEvent
 
 
 class LoginAttemptThrottle(SimpleRateThrottle):
@@ -129,6 +130,10 @@ class RegistrationView(APIView):
         try:
             with transaction.atomic():
                 user = serializer.save()
+                AuthenticationAuditEvent.objects.create(
+                    user=user, username_snapshot=user.get_username(),
+                    action=AuthenticationAuditEvent.Action.REGISTRATION,
+                )
         except IntegrityError:
             return Response(
                 {'detail': 'That username or email is already registered.'},
@@ -172,6 +177,10 @@ class LoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         _clear_login_username_failures(username)
+        AuthenticationAuditEvent.objects.create(
+            user=user, username_snapshot=user.get_username(),
+            action=AuthenticationAuditEvent.Action.LOGIN_SUCCESS,
+        )
         login(request._request, user)
         return Response(CurrentUserSerializer(user).data)
 
@@ -181,6 +190,10 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        AuthenticationAuditEvent.objects.create(
+            user=request.user, username_snapshot=request.user.get_username(),
+            action=AuthenticationAuditEvent.Action.LOGOUT,
+        )
         logout(request._request)
         return Response(status=status.HTTP_204_NO_CONTENT)
 

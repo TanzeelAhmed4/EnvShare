@@ -64,7 +64,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'config.security_middleware.ContentSecurityPolicyMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'config.security_middleware.AdminLoginRateLimitMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -93,15 +95,57 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/6.1/ref/settings/#databases
-
-DATABASES = {
-    'default': {
+# Database: SQLite remains the local default; PostgreSQL is configured only
+# when explicitly selected, with credentials supplied through the environment.
+DB_ENGINE = os.environ.get('ENVSHARE_DB_ENGINE', 'sqlite').strip().lower()
+if DB_ENGINE == 'sqlite':
+    if ENVSHARE_ENV == 'production':
+        raise ImproperlyConfigured('PostgreSQL must be selected with ENVSHARE_DB_ENGINE in production.')
+    DATABASES = {'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+        'OPTIONS': {'timeout': 20},
+    }}
+elif DB_ENGINE in {'postgres', 'postgresql'}:
+    db_name = os.environ.get('ENVSHARE_DB_NAME', '').strip()
+    db_user = os.environ.get('ENVSHARE_DB_USER', '').strip()
+    db_password = os.environ.get('ENVSHARE_DB_PASSWORD', '')
+    db_host = os.environ.get('ENVSHARE_DB_HOST', '').strip()
+    db_port = os.environ.get('ENVSHARE_DB_PORT', '5432').strip()
+    if not all((db_name, db_user, db_password, db_host)):
+        raise ImproperlyConfigured(
+            'ENVSHARE_DB_NAME, ENVSHARE_DB_USER, ENVSHARE_DB_PASSWORD, and ENVSHARE_DB_HOST are required for PostgreSQL.'
+        )
+    try:
+        connect_timeout = int(os.environ.get('ENVSHARE_DB_CONNECT_TIMEOUT', '5'))
+        if connect_timeout < 1 or not 1 <= int(db_port) <= 65535:
+            raise ValueError
+    except ValueError:
+        raise ImproperlyConfigured('PostgreSQL port and connection timeout must be valid positive integers.') from None
+    sslmode = os.environ.get(
+        'ENVSHARE_DB_SSLMODE', 'require' if ENVSHARE_ENV == 'production' else 'prefer',
+    ).strip().lower()
+    if sslmode not in {'disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'}:
+        raise ImproperlyConfigured('ENVSHARE_DB_SSLMODE is invalid.')
+    if ENVSHARE_ENV == 'production' and sslmode in {'disable', 'allow', 'prefer'}:
+        raise ImproperlyConfigured('PostgreSQL SSL must be required in production.')
+    DATABASES = {'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': db_name,
+        'USER': db_user,
+        'PASSWORD': db_password,
+        'HOST': db_host,
+        'PORT': db_port,
+        'CONN_MAX_AGE': 60,
+        'CONN_HEALTH_CHECKS': True,
+        'OPTIONS': {
+            'connect_timeout': connect_timeout,
+            'sslmode': sslmode,
+            **({'sslrootcert': os.environ['ENVSHARE_DB_SSLROOTCERT']} if os.environ.get('ENVSHARE_DB_SSLROOTCERT') else {}),
+        },
+    }}
+else:
+    raise ImproperlyConfigured('ENVSHARE_DB_ENGINE must be sqlite or postgresql.')
 
 
 # Password validation
@@ -139,6 +183,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles' if ENVSHARE_ENV == 'production' else None
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
@@ -146,6 +191,16 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'envshare@localhost'
+if ENVSHARE_ENV == 'production':
+    EMAIL_BACKEND = _production.get('EMAIL_BACKEND', 'django.core.mail.backends.dummy.EmailBackend')
+    EMAIL_HOST = _production.get('EMAIL_HOST', '')
+    EMAIL_PORT = _production.get('EMAIL_PORT', 587)
+    EMAIL_HOST_USER = _production.get('EMAIL_HOST_USER', '')
+    EMAIL_HOST_PASSWORD = _production.get('EMAIL_HOST_PASSWORD', '')
+    EMAIL_USE_TLS = _production.get('EMAIL_USE_TLS', False)
+    EMAIL_USE_SSL = _production.get('EMAIL_USE_SSL', False)
+    DEFAULT_FROM_EMAIL = _production.get('DEFAULT_FROM_EMAIL', 'envshare@localhost')
 AUTH_USER_MODEL = 'accounts.User'
 
 PASSWORD_HASHERS = [
@@ -174,6 +229,7 @@ SESSION_COOKIE_AGE = (
 )
 SESSION_SAVE_EVERY_REQUEST = ENVSHARE_ENV == 'production'
 SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = ENVSHARE_ENV == 'production'
 SESSION_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = ENVSHARE_ENV == 'production'
@@ -185,8 +241,50 @@ SECURE_HSTS_PRELOAD = _production['SECURE_HSTS_PRELOAD'] if ENVSHARE_ENV == 'pro
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = 'same-origin'
 X_FRAME_OPTIONS = 'DENY'
+SECURE_PROXY_SSL_HEADER = (
+    ('HTTP_X_FORWARDED_PROTO', 'https')
+    if ENVSHARE_ENV == 'production' and _production['TRUST_PROXY_SSL_HEADER'] else None
+)
+CSP_POLICY = (
+    "default-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
+    "object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "font-src 'self' data:; connect-src 'self'"
+)
+
+if ENVSHARE_ENV == 'production':
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': _production['CACHE_URL'],
+        'KEY_PREFIX': 'envshare',
+        'TIMEOUT': 300,
+    }}
+else:
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'envshare-local',
+    }}
+
+LOG_LEVEL = _production['LOG_LEVEL'] if ENVSHARE_ENV == 'production' else os.environ.get('ENVSHARE_LOG_LEVEL', 'INFO').upper()
+if ENVSHARE_ENV == 'production':
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'filters': {'sensitive_data': {'()': 'config.security_middleware.SensitiveDataFilter'}},
+        'formatters': {'structured': {'()': 'config.security_middleware.StructuredJsonFormatter'}},
+        'handlers': {'console': {
+            'class': 'logging.StreamHandler',
+            'filters': ['sensitive_data'],
+            'formatter': 'structured',
+        }},
+        'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+        'loggers': {
+            'django': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+            'django.request': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+        },
+    }
 
 REST_FRAMEWORK = {
+    'EXCEPTION_HANDLER': 'config.exceptions.api_exception_handler',
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.SessionAuthentication',
     ],

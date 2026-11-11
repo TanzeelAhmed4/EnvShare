@@ -76,13 +76,17 @@ class ProjectInvitation(models.Model):
 
 class ProjectAccessAuditEvent(models.Model):
     class Action(models.TextChoices):
+        PROJECT_CREATED = 'project_created', 'Project created'
+        MEMBERSHIP_ADDED = 'membership_added', 'Member added'
         INVITATION_CREATED = 'invitation_created', 'Invitation created'
         INVITATION_REVOKED = 'invitation_revoked', 'Invitation revoked'
         INVITATION_ACCEPTED = 'invitation_accepted', 'Invitation accepted'
         ROLE_CHANGED = 'role_changed', 'Membership role changed'
         MEMBER_REMOVED = 'member_removed', 'Member removed'
 
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='access_events')
+    project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, related_name='access_events')
+    project_id_snapshot = models.PositiveBigIntegerField(default=0)
+    project_name_snapshot = models.CharField(max_length=120, blank=True)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     actor_username = models.CharField(max_length=150)
     action = models.CharField(max_length=32, choices=Action.choices)
@@ -94,7 +98,17 @@ class ProjectAccessAuditEvent(models.Model):
 
     class Meta:
         ordering = ('-created_at', '-pk')
-        indexes = [models.Index(fields=('project', '-created_at'), name='access_audit_proj_time_idx')]
+        indexes = [
+            models.Index(fields=('project', '-created_at'), name='access_audit_proj_time_idx'),
+            models.Index(fields=('project', 'action', '-created_at'), name='access_audit_action_idx'),
+            models.Index(fields=('project', 'actor_username'), name='access_audit_actor_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.project_id:
+            self.project_id_snapshot = self.project_id
+            self.project_name_snapshot = self.project.name
+        super().save(*args, **kwargs)
 
 
 class Environment(models.Model):
@@ -167,8 +181,10 @@ class EnvironmentVariableAuditEvent(models.Model):
         RESTORED = 'restored', 'Restored'
         VERSION_ACCESSED = 'version_accessed', 'Historical value accessed'
         VERSION_COMPARED = 'version_compared', 'Sensitive versions compared'
+        BULK_IMPORTED = 'bulk_imported', 'Bulk import'
 
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='audit_events')
+    project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, related_name='audit_events')
+    project_id_snapshot = models.PositiveBigIntegerField(default=0)
     environment = models.ForeignKey(
         Environment,
         on_delete=models.SET_NULL,
@@ -197,7 +213,16 @@ class EnvironmentVariableAuditEvent(models.Model):
         indexes = [
             models.Index(fields=('project', '-created_at'), name='audit_project_time_idx'),
             models.Index(fields=('environment', '-created_at'), name='audit_env_time_idx'),
+            models.Index(fields=('project', 'action', '-created_at'), name='audit_project_action_idx'),
+            models.Index(fields=('project', 'actor', '-created_at'), name='audit_project_actor_idx'),
+            models.Index(fields=('project', 'variable_id'), name='audit_project_variable_idx'),
+            models.Index(fields=('project', 'variable_key'), name='audit_project_key_idx'),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.project_id:
+            self.project_id_snapshot = self.project_id
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f'{self.get_action_display()} {self.variable_key} by {self.actor_username}'
@@ -210,7 +235,8 @@ class EnvironmentVariableVersion(models.Model):
         RESTORED = 'restored', 'Restored'
         DELETED = 'deleted', 'Deleted'
 
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='variable_versions')
+    project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, related_name='variable_versions')
+    project_id_snapshot = models.PositiveBigIntegerField(default=0)
     environment = models.ForeignKey(
         Environment, on_delete=models.SET_NULL, null=True, related_name='variable_versions'
     )

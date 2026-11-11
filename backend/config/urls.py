@@ -26,15 +26,18 @@ from accounts.auth_views import (
     LogoutView,
     RegistrationView,
 )
+from config.health_views import live, ready
 
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def api_root(request):
-    return Response({'name': 'EnvShare API', 'status': 'ready'})
+    return Response({'name': 'EnvShare API', 'status': 'ok'})
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('health/live/', live, name='health-live'),
+    path('health/ready/', ready, name='health-ready'),
     path('api/', api_root, name='api-root'),
     path('api/auth/csrf/', CsrfTokenView.as_view(), name='auth-csrf'),
     path('api/auth/register/', RegistrationView.as_view(), name='auth-register'),

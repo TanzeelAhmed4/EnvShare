@@ -1,6 +1,7 @@
 import difflib
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
@@ -11,7 +12,11 @@ from rest_framework.views import APIView
 from .audit import record_variable_audit
 from .encryption import EncryptionError, decrypt_historical_value
 from .environment_serializers import EnvironmentVariableSerializer
-from .environment_views import encryption_error_response, get_project_environment
+from .environment_views import (
+    encryption_error_response,
+    get_project_environment,
+    lock_project_environment_for_write,
+)
 from .models import EnvironmentVariable, EnvironmentVariableAuditEvent, EnvironmentVariableVersion
 from .permissions import has_project_permission
 from .versions import create_variable_version
@@ -73,17 +78,18 @@ class EnvironmentVariableVersionValueView(APIView):
     def get(self, request, project_id, environment_id, variable_id, version_id):
         environment, variable = get_current_variable(request, project_id, environment_id, variable_id)
         version = get_variable_version(environment.project, environment, variable, version_id)
-        if version.sensitivity == EnvironmentVariable.Sensitivity.SENSITIVE and not has_project_permission(
-            request.user, environment.project, 'reveal',
-        ):
-            raise PermissionDenied('You do not have permission to access historical Sensitive values.')
-        try:
-            plaintext = decrypt_historical_value(version)
-        except EncryptionError as error:
-            return encryption_error_response(error)
         if version.sensitivity == EnvironmentVariable.Sensitivity.SENSITIVE:
             try:
                 with transaction.atomic():
+                    lock_project_environment_for_write(
+                        request, environment.project, environment, 'reveal',
+                    )
+                    variable = get_object_or_404(
+                        EnvironmentVariable.objects.select_for_update(),
+                        pk=variable_id, environment=environment,
+                    )
+                    version = get_variable_version(environment.project, environment, variable, version_id)
+                    plaintext = decrypt_historical_value(version)
                     record_variable_audit(
                         action=EnvironmentVariableAuditEvent.Action.VERSION_ACCESSED,
                         actor=request.user,
@@ -93,11 +99,22 @@ class EnvironmentVariableVersionValueView(APIView):
                         sensitivity=version.sensitivity,
                         extra_changes={'version': {'before': None, 'after': version.version_number}},
                     )
+            except PermissionDenied:
+                raise
+            except EncryptionError as error:
+                return encryption_error_response(error)
+            except Http404:
+                raise
             except Exception:
                 return Response(
                     {'detail': 'The historical value access could not be audited.'},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
+        else:
+            try:
+                plaintext = decrypt_historical_value(version)
+            except EncryptionError as error:
+                return encryption_error_response(error)
         return Response({
             'version_number': version.version_number,
             'key': version.variable_key,
@@ -129,26 +146,29 @@ class EnvironmentVariableVersionCompareView(APIView):
         if sensitive and not has_project_permission(request.user, environment.project, 'reveal'):
             raise PermissionDenied('You do not have permission to compare historical Sensitive values.')
         try:
-            left_value, right_value = (decrypt_historical_value(version) for version in versions)
-        except EncryptionError as error:
-            return encryption_error_response(error)
-        result = {
-            'left_version': versions[0].version_number,
-            'right_version': versions[1].version_number,
-            'sensitive': sensitive,
-            'different': left_value != right_value,
-        }
-        if not sensitive:
-            result['diff'] = list(difflib.unified_diff(
-                left_value.splitlines(),
-                right_value.splitlines(),
-                fromfile=f'v{versions[0].version_number}',
-                tofile=f'v{versions[1].version_number}',
-                lineterm='',
-            ))
-        else:
-            try:
+            if sensitive:
                 with transaction.atomic():
+                    lock_project_environment_for_write(
+                        request, environment.project, environment, 'reveal',
+                    )
+                    variable = get_object_or_404(
+                        EnvironmentVariable.objects.select_for_update(),
+                        pk=variable_id, environment=environment,
+                    )
+                    versions = [
+                        get_variable_version(environment.project, environment, variable, version_id)
+                        for version_id in (
+                            serializer.validated_data['left_version_id'],
+                            serializer.validated_data['right_version_id'],
+                        )
+                    ]
+                    left_value, right_value = (decrypt_historical_value(version) for version in versions)
+                    result = {
+                        'left_version': versions[0].version_number,
+                        'right_version': versions[1].version_number,
+                        'sensitive': True,
+                        'different': left_value != right_value,
+                    }
                     record_variable_audit(
                         action=EnvironmentVariableAuditEvent.Action.VERSION_COMPARED,
                         actor=request.user,
@@ -157,18 +177,36 @@ class EnvironmentVariableVersionCompareView(APIView):
                         key=variable.key,
                         sensitivity=EnvironmentVariable.Sensitivity.SENSITIVE,
                         extra_changes={
-                            'versions': {
-                                'before': versions[0].version_number,
-                                'after': versions[1].version_number,
-                            },
+                            'versions': {'before': versions[0].version_number, 'after': versions[1].version_number},
                             'different': {'before': None, 'after': result['different']},
                         },
                     )
-            except Exception:
-                return Response(
-                    {'detail': 'The historical comparison could not be audited.'},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
+            else:
+                left_value, right_value = (decrypt_historical_value(version) for version in versions)
+                result = {
+                    'left_version': versions[0].version_number,
+                    'right_version': versions[1].version_number,
+                    'sensitive': False,
+                    'different': left_value != right_value,
+                    'diff': list(difflib.unified_diff(
+                        left_value.splitlines(), right_value.splitlines(),
+                        fromfile=f'v{versions[0].version_number}',
+                        tofile=f'v{versions[1].version_number}', lineterm='',
+                    )),
+                }
+        except PermissionDenied:
+            raise
+        except EncryptionError as error:
+            return encryption_error_response(error)
+        except Http404:
+            raise
+        except Exception:
+            if not sensitive:
+                raise
+            return Response(
+                {'detail': 'The historical comparison could not be audited.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(result)
 
 
@@ -181,6 +219,9 @@ class EnvironmentVariableVersionRestoreView(APIView):
         )
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(
+                    request, environment.project, environment, 'edit_variables',
+                )
                 variable = get_object_or_404(
                     EnvironmentVariable.objects.select_for_update(),
                     pk=variable_id,
@@ -225,6 +266,8 @@ class EnvironmentVariableVersionRestoreView(APIView):
             return encryption_error_response(error)
         except IntegrityError:
             return Response({'detail': 'The variable could not be restored.'}, status=400)
+        except OperationalError:
+            return Response({'detail': 'Restoration conflicted with another write. Try again.'}, status=409)
         return Response(EnvironmentVariableSerializer(
             restored, context={'environment': environment},
         ).data)

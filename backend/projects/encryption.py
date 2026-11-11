@@ -65,7 +65,7 @@ def _decrypt_with_context(envelope, associated_data):
 def historical_associated_data(version):
     context = [
         'envshare:variable-version:v1',
-        version.project_id,
+        version.project_id_snapshot,
         version.environment_id_snapshot,
         version.variable_id_snapshot,
         version.variable_key,

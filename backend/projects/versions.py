@@ -10,7 +10,8 @@ def create_variable_version(*, variable, action, actor, plaintext):
         variable_id_snapshot=variable.pk,
     ).aggregate(value=Max('version_number'))['value'] or 0
     version = EnvironmentVariableVersion(
-        project_id=variable.environment.project_id,
+        project=variable.environment.project,
+        project_id_snapshot=variable.environment.project_id,
         environment=variable.environment,
         environment_id_snapshot=variable.environment_id,
         variable=variable,

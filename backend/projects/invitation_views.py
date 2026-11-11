@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 
 from .models import Project, ProjectAccessAuditEvent, ProjectInvitation, ProjectMembership
 from .permissions import can_access_project, has_project_permission
+from .write_locks import lock_project_for_write
 
 User = get_user_model()
 
@@ -88,21 +89,29 @@ class ProjectInvitationListCreateView(APIView):
             raise PermissionDenied('You cannot invite someone with that project role.')
         token = secrets.token_urlsafe(32)
         data = serializer.validated_data
-        with transaction.atomic():
-            invitation = ProjectInvitation.objects.create(
-                project=project,
-                invited_email=normalized_email(data['email']),
-                token_hash=token_digest(token),
-                role=role,
-                created_by=request.user,
-                expires_at=timezone.now() + timedelta(hours=data['expires_in_hours']),
-                max_uses=data['max_uses'],
-            )
-            ProjectAccessAuditEvent.objects.create(
-                project=project, actor=request.user, actor_username=request.user.get_username(),
-                action=ProjectAccessAuditEvent.Action.INVITATION_CREATED,
-                target_email=invitation.invited_email, role_after=role,
-            )
+        try:
+            with transaction.atomic():
+                lock_project_for_write(project.pk)
+                if not has_project_permission(request.user, project, 'manage_members') or not has_project_permission(
+                    request.user, project, 'assign_' + role,
+                ):
+                    raise PermissionDenied('You cannot invite someone with that project role.')
+                invitation = ProjectInvitation.objects.create(
+                    project=project,
+                    invited_email=normalized_email(data['email']),
+                    token_hash=token_digest(token),
+                    role=role,
+                    created_by=request.user,
+                    expires_at=timezone.now() + timedelta(hours=data['expires_in_hours']),
+                    max_uses=data['max_uses'],
+                )
+                ProjectAccessAuditEvent.objects.create(
+                    project=project, actor=request.user, actor_username=request.user.get_username(),
+                    action=ProjectAccessAuditEvent.Action.INVITATION_CREATED,
+                    target_email=invitation.invited_email, role_after=role,
+                )
+        except OperationalError:
+            return Response({'detail': 'Invitation creation conflicted with another write. Try again.'}, status=409)
         return Response({
             'id': invitation.pk, 'email': invitation.invited_email, 'role': invitation.role,
             'expires_at': invitation.expires_at, 'max_uses': invitation.max_uses,
@@ -121,14 +130,24 @@ class ProjectInvitationDetailView(APIView):
             raise PermissionDenied('You do not have permission to revoke invitations.')
         invitation = get_object_or_404(ProjectInvitation, pk=invitation_id, project=project)
         if invitation.revoked_at is None:
-            with transaction.atomic():
-                invitation.revoked_at = timezone.now()
-                invitation.save(update_fields=('revoked_at',))
-                ProjectAccessAuditEvent.objects.create(
-                    project=project, actor=request.user, actor_username=request.user.get_username(),
-                    action=ProjectAccessAuditEvent.Action.INVITATION_REVOKED,
-                    target_email=invitation.invited_email, role_before=invitation.role,
-                )
+            try:
+                with transaction.atomic():
+                    lock_project_for_write(project.pk)
+                    if not has_project_permission(request.user, project, 'manage_members'):
+                        raise PermissionDenied('You do not have permission to revoke invitations.')
+                    invitation = get_object_or_404(
+                        ProjectInvitation.objects.select_for_update(), pk=invitation_id, project=project,
+                    )
+                    if invitation.revoked_at is None:
+                        invitation.revoked_at = timezone.now()
+                        invitation.save(update_fields=('revoked_at',))
+                        ProjectAccessAuditEvent.objects.create(
+                            project=project, actor=request.user, actor_username=request.user.get_username(),
+                            action=ProjectAccessAuditEvent.Action.INVITATION_REVOKED,
+                            target_email=invitation.invited_email, role_before=invitation.role,
+                        )
+            except OperationalError:
+                return Response({'detail': 'Invitation revocation conflicted with another write. Try again.'}, status=409)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -168,6 +187,7 @@ class InvitationAcceptView(APIView):
             return Response({'detail': 'You already have access to this project.'}, status=409)
         try:
             with transaction.atomic():
+                lock_project_for_write(invitation.project_id)
                 if not claim_invitation_use(invitation.pk, digest):
                     return Response({'detail': 'Invitation is invalid or unavailable.'}, status=404)
                 if ProjectMembership.objects.filter(project=invitation.project, user=request.user).exists() or invitation.project.creator_id == request.user.pk:
@@ -187,7 +207,6 @@ class InvitationAcceptView(APIView):
         except IntegrityError:
             return Response({'detail': 'You already have access to this project.'}, status=409)
         except OperationalError:
-            # SQLite may reject one side of a concurrent write instead of waiting for a row lock.
-            # The conditional claim and transaction prevent a second acceptance from consuming a use.
+            # SQLite may reject one side of a concurrent write; its transaction rolls back the claim.
             return Response({'detail': 'Invitation acceptance conflicted with another request. Try again.'}, status=409)
         return Response({'project_id': invitation.project_id, 'project_name': invitation.project.name, 'role': invitation.role}, status=200)

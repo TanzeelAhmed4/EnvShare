@@ -5,9 +5,11 @@ import json
 from django.conf import settings
 from django.core import signing
 from django.core.signing import BadSignature, SignatureExpired
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +22,7 @@ from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEv
 from .permissions import has_project_permission
 from .views import visible_projects_for
 from .versions import create_variable_version
+from .write_locks import lock_environment_for_write, lock_project_for_write
 
 
 def get_project_environment(request, project_id, environment_id=None, permission='view_variables'):
@@ -31,6 +34,13 @@ def get_project_environment(request, project_id, environment_id=None, permission
         return project, None
     environment = get_object_or_404(Environment, pk=environment_id, project=project)
     return project, environment
+
+
+def lock_project_environment_for_write(request, project, environment, permission):
+    lock_project_for_write(project.pk)
+    if not has_project_permission(request.user, project, permission):
+        raise PermissionDenied('You do not have permission to perform this project action.')
+    lock_environment_for_write(environment.pk)
 
 
 def encryption_error_response(error):
@@ -59,7 +69,7 @@ class EnvironmentVariableListCreateView(APIView):
         ).data)
 
     def post(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id, 'create_variables')
+        project, environment = get_project_environment(request, project_id, environment_id, 'create_variables')
         serializer = EnvironmentVariableSerializer(
             data=request.data,
             context={'environment': environment},
@@ -68,6 +78,7 @@ class EnvironmentVariableListCreateView(APIView):
         plaintext = serializer.validated_data['value']
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(request, project, environment, 'create_variables')
                 variable = serializer.save(environment=environment)
                 version = create_variable_version(
                     variable=variable,
@@ -92,6 +103,8 @@ class EnvironmentVariableListCreateView(APIView):
                 {'detail': 'The variable and its audit record could not be saved.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except OperationalError:
+            return Response({'detail': 'The variable creation conflicted with another write. Try again.'}, status=409)
         return Response(
             EnvironmentVariableSerializer(variable, context={'environment': environment}).data,
             status=status.HTTP_201_CREATED,
@@ -118,9 +131,10 @@ class EnvironmentVariableDetailView(APIView):
         ).data)
 
     def patch(self, request, project_id, environment_id, variable_id):
-        _project, environment = get_project_environment(request, project_id, environment_id, 'edit_variables')
+        project, environment = get_project_environment(request, project_id, environment_id, 'edit_variables')
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(request, project, environment, 'edit_variables')
                 variable = get_object_or_404(
                     EnvironmentVariable.objects.select_for_update(),
                     pk=variable_id,
@@ -184,15 +198,21 @@ class EnvironmentVariableDetailView(APIView):
                 {'detail': 'The variable update and its audit record could not be saved.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except OperationalError:
+            return Response(
+                {'detail': 'The request conflicted with another database write. Retry the operation.'},
+                status=409,
+            )
         return Response(EnvironmentVariableSerializer(
             updated,
             context={'environment': environment},
         ).data)
 
     def delete(self, request, project_id, environment_id, variable_id):
-        _project, environment = get_project_environment(request, project_id, environment_id, 'delete_variables')
+        project, environment = get_project_environment(request, project_id, environment_id, 'delete_variables')
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(request, project, environment, 'delete_variables')
                 variable = get_object_or_404(
                     EnvironmentVariable.objects.select_for_update(),
                     pk=variable_id,
@@ -224,6 +244,8 @@ class EnvironmentVariableDetailView(APIView):
             return encryption_error_response(error)
         except IntegrityError:
             return Response({'detail': 'The variable and its history could not be deleted.'}, status=400)
+        except OperationalError:
+            return Response({'detail': 'The variable deletion conflicted with another write. Try again.'}, status=409)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -231,20 +253,19 @@ class EnvironmentVariableRevealView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, environment_id, variable_id):
-        _project, environment = get_project_environment(request, project_id, environment_id, 'reveal')
-        variable = get_object_or_404(EnvironmentVariable, pk=variable_id, environment=environment)
-        if variable.sensitivity != EnvironmentVariable.Sensitivity.SENSITIVE:
-            return Response(
-                {'detail': 'Only Sensitive variables have a reveal operation.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            plaintext = decrypt_value(variable.value, environment, variable.key)
-        except EncryptionError as error:
-            return encryption_error_response(error)
-
+        project, environment = get_project_environment(request, project_id, environment_id, 'reveal')
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(request, project, environment, 'reveal')
+                variable = get_object_or_404(
+                    EnvironmentVariable.objects.select_for_update(), pk=variable_id, environment=environment,
+                )
+                if variable.sensitivity != EnvironmentVariable.Sensitivity.SENSITIVE:
+                    return Response(
+                        {'detail': 'Only Sensitive variables have a reveal operation.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                plaintext = decrypt_value(variable.value, environment, variable.key)
                 record_variable_audit(
                     action=EnvironmentVariableAuditEvent.Action.REVEALED,
                     actor=request.user,
@@ -253,6 +274,12 @@ class EnvironmentVariableRevealView(APIView):
                     key=variable.key,
                     sensitivity=variable.sensitivity,
                 )
+        except EncryptionError as error:
+            return encryption_error_response(error)
+        except PermissionDenied:
+            raise
+        except Http404:
+            raise
         except Exception:
             # A reveal is successful only when its audit event is persisted.
             # Do not include exception details, which could expose data.
@@ -391,7 +418,7 @@ class EnvironmentImportConfirmView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, environment_id):
-        _project, environment = get_project_environment(request, project_id, environment_id, 'import')
+        project, environment = get_project_environment(request, project_id, environment_id, 'import')
         if request.data.get('confirm') is not True:
             return Response({'detail': 'Confirm the import after reviewing its preview.'}, status=400)
         content, classifications, error = import_request_data(request)
@@ -430,6 +457,7 @@ class EnvironmentImportConfirmView(APIView):
         created = updated = unchanged = 0
         try:
             with transaction.atomic():
+                lock_project_environment_for_write(request, project, environment, 'import')
                 keys = [entry['key'] for entry in entries]
                 existing = {
                     item.key: item for item in EnvironmentVariable.objects.filter(
@@ -475,7 +503,10 @@ class EnvironmentImportConfirmView(APIView):
                             key=variable.key,
                             sensitivity=variable.sensitivity,
                             value_after=variable.value,
-                            extra_changes={'version': {'before': None, 'after': version.version_number}},
+                            extra_changes={
+                                'version': {'before': None, 'after': version.version_number},
+                                'source': {'before': None, 'after': 'bulk_import'},
+                            },
                         )
                         created += 1
                     else:
@@ -511,11 +542,16 @@ class EnvironmentImportConfirmView(APIView):
                             value_after=variable.value,
                             sensitivity_before_for_value=variable.sensitivity,
                             sensitivity_after_for_value=variable.sensitivity,
-                            extra_changes={'version': {'before': None, 'after': version.version_number}},
+                            extra_changes={
+                                'version': {'before': None, 'after': version.version_number},
+                                'source': {'before': None, 'after': 'bulk_import'},
+                            },
                         )
                         updated += 1
         except EncryptionError as encryption_error:
             return encryption_error_response(encryption_error)
         except IntegrityError:
             return Response({'detail': 'The import and its audit records could not be saved.'}, status=400)
+        except OperationalError:
+            return Response({'detail': 'The import conflicted with another write. Preview the changes again.'}, status=409)
         return Response({'created': created, 'updated': updated, 'unchanged': unchanged}, status=200)

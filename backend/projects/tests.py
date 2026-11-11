@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import Project, ProjectMembership
+from .models import Project, ProjectAccessAuditEvent, ProjectMembership
 from .permissions import can_access_project, can_edit_project_data
 
 
@@ -43,6 +43,9 @@ class ProjectApiTests(TestCase):
         self.assertEqual(response.json()['member_count'], 0)
         self.assertIsNotNone(response.json()['created_at'])
         self.assertIsNotNone(response.json()['updated_at'])
+        self.assertTrue(ProjectAccessAuditEvent.objects.filter(
+            project=created, action=ProjectAccessAuditEvent.Action.PROJECT_CREATED,
+        ).exists())
 
     def test_project_creation_requires_authentication_and_a_name(self):
         anonymous_response = self.client.post('/api/projects/', {'name': 'No access'}, format='json')
@@ -87,6 +90,10 @@ class ProjectApiTests(TestCase):
         self.assertEqual(response.json()['role'], ProjectMembership.Role.MANAGER)
         membership = ProjectMembership.objects.get(project=self.project, user=self.member)
         self.assertEqual(membership.added_by, self.creator)
+        self.assertTrue(ProjectAccessAuditEvent.objects.filter(
+            project=self.project, action=ProjectAccessAuditEvent.Action.MEMBERSHIP_ADDED,
+            target_username=self.member.username,
+        ).exists())
 
         self.authenticate_as(self.member)
         self.assertEqual(self.client.get('/api/projects/').json()[0]['id'], self.project.pk)
@@ -181,3 +188,5 @@ from .role_invitation_tests import ProjectRoleAndInvitationTests  # noqa: F401,E
 from .role_invitation_tests import ExistingMembershipMigrationTests  # noqa: F401,E402
 from .role_invitation_tests import ConcurrentInvitationClaimTests  # noqa: F401,E402
 from .version_tests import EnvironmentVariableVersionTests  # noqa: F401,E402
+from .postgres_tests import PostgreSQLConcurrencyIntegrationTests  # noqa: F401,E402
+from .sqlite_concurrency_tests import SQLiteConcurrentVariableUpdateTests  # noqa: F401,E402

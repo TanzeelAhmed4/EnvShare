@@ -7,7 +7,10 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from .encryption import encrypt_value
-from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent, Project, ProjectMembership
+from .models import (
+    Environment, EnvironmentVariable, EnvironmentVariableAuditEvent,
+    Project, ProjectAccessAuditEvent, ProjectMembership,
+)
 
 
 TEST_KEY = base64.urlsafe_b64encode(b'A' * 32).decode('ascii')
@@ -252,12 +255,89 @@ class EnvironmentVariableAuditTests(TestCase):
         self.client.force_authenticate(user=self.member)
         member_response = self.client.get(self.audit_url())
         self.assertEqual(member_response.status_code, 200)
-        self.assertEqual(member_response.json()[0]['actor'], 'audit-owner')
-        self.assertEqual(member_response.json()[0]['environment_label'], 'Development')
+        self.assertEqual(member_response.json()['results'][0]['actor'], 'audit-owner')
+        self.assertEqual(member_response.json()['results'][0]['environment_label'], 'Development')
 
         self.client.force_authenticate(user=self.outsider)
         outsider_response = self.client.get(self.audit_url())
         self.assertEqual(outsider_response.status_code, 404)
+
+    def test_audit_filters_pagination_and_invalid_filters(self):
+        self.create_variable('FILTER_ONE', 'one')
+        self.create_variable('FILTER_TWO', 'two')
+        self.client.force_authenticate(user=self.member)
+        filtered = self.client.get(
+            self.audit_url(), {'search': 'FILTER_ONE', 'environment': self.environment.pk, 'actor': self.owner.username},
+        )
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual(filtered.json()['count'], 1)
+        self.assertEqual(filtered.json()['results'][0]['variable_key'], 'FILTER_ONE')
+        self.assertEqual(filtered.json()['page'], 1)
+        self.assertEqual(self.client.get(self.audit_url(), {'action': 'not-an-action'}).status_code, 400)
+        self.assertEqual(self.client.get(self.audit_url(), {'date_from': 'yesterday'}).status_code, 400)
+        self.assertEqual(self.client.get(self.audit_url(), {'page_size': 101}).status_code, 400)
+
+        events = [
+            EnvironmentVariableAuditEvent.objects.create(
+                project=self.project, environment=self.environment, variable_id=900 + index,
+                variable_key=f'PAGE_{index}', action='updated', actor=self.owner,
+                actor_username=self.owner.username, project_name=self.project.name,
+                environment_name=self.environment.name, changes={},
+            )
+            for index in range(3)
+        ]
+        first_page = self.client.get(self.audit_url(), {'page_size': 2, 'page': 1, 'action': 'updated'})
+        second_page = self.client.get(self.audit_url(), {'page_size': 2, 'page': 2, 'action': 'updated'})
+        self.assertEqual((first_page.json()['count'], len(first_page.json()['results'])), (3, 2))
+        self.assertEqual((second_page.json()['page'], len(second_page.json()['results'])), (2, 1))
+        self.assertNotEqual(first_page.json()['results'][0]['id'], first_page.json()['results'][1]['id'])
+
+        ProjectAccessAuditEvent.objects.create(
+            project=self.project, actor=self.owner, actor_username=self.owner.username,
+            action=ProjectAccessAuditEvent.Action.MEMBERSHIP_ADDED, target_username='filter-target',
+        )
+        access = self.client.get(
+            f'/api/projects/{self.project.pk}/access-audit/',
+            {'action': 'membership_added', 'actor': self.owner.username},
+        )
+        self.assertEqual(access.status_code, 200)
+        self.assertEqual(access.json()['count'], 1)
+
+        EnvironmentVariableAuditEvent.objects.create(
+            project=self.project, environment=self.environment, variable_id=999,
+            variable_key='IMPORTED_KEY', action='created', actor=self.owner,
+            actor_username=self.owner.username, project_name=self.project.name,
+            environment_name=self.environment.name,
+            changes={'source': {'before': None, 'after': 'bulk_import'}},
+        )
+        imported = self.client.get(self.audit_url(), {'action': 'bulk_imported'})
+        self.assertEqual(imported.status_code, 200)
+        self.assertEqual(imported.json()['count'], 1)
+
+    def test_audit_history_is_read_only_and_project_deletion_preserves_audit_and_versions(self):
+        variable = self.create_variable('PRESERVED', 'value')
+        project_id = self.project.pk
+        event = EnvironmentVariableAuditEvent.objects.get(variable_key='PRESERVED')
+        version = variable.versions.get()
+        self.client.force_authenticate(user=self.owner)
+        self.assertEqual(self.client.post(self.audit_url(), {}, format='json').status_code, 405)
+        self.assertEqual(self.client.patch(self.audit_url(), {}, format='json').status_code, 405)
+        self.assertEqual(self.client.delete(self.audit_url()).status_code, 405)
+        access_event = ProjectAccessAuditEvent.objects.create(
+            project=self.project, actor=self.owner, actor_username=self.owner.username,
+            action=ProjectAccessAuditEvent.Action.PROJECT_CREATED,
+        )
+        deleted = self.client.delete(f'/api/projects/{project_id}/delete/')
+        self.assertEqual(deleted.status_code, 204)
+        event.refresh_from_db()
+        version.refresh_from_db()
+        access_event.refresh_from_db()
+        self.assertIsNone(event.project_id)
+        self.assertEqual(event.project_id_snapshot, project_id)
+        self.assertIsNone(version.project_id)
+        self.assertEqual(version.project_id_snapshot, project_id)
+        self.assertIsNone(access_event.project_id)
+        self.assertEqual(access_event.project_id_snapshot, project_id)
 
     def test_audit_write_failure_rolls_back_variable_creation(self):
         client = APIClient(raise_request_exception=False)
@@ -272,4 +352,25 @@ class EnvironmentVariableAuditTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertFalse(EnvironmentVariable.objects.filter(key='ROLLBACK_ME').exists())
         self.assertFalse(EnvironmentVariableAuditEvent.objects.exists())
+
+    def test_import_audit_failure_rolls_back_variables_versions_and_audits(self):
+        self.client.force_authenticate(user=self.owner)
+        confirm_url = f'/api/projects/{self.project.pk}/environments/{self.environment.pk}/import/confirm/'
+        preview = self.client.post(
+            confirm_url.replace('/confirm/', '/preview/'),
+            {'content': 'ROLLBACK_IMPORT=value', 'classifications': {'ROLLBACK_IMPORT': 'standard'}},
+            format='json',
+        )
+        self.assertEqual(preview.status_code, 200)
+        client = APIClient(raise_request_exception=False)
+        client.force_authenticate(user=self.owner)
+        with patch('projects.environment_views.record_variable_audit', side_effect=RuntimeError('audit failed')):
+            response = client.post(confirm_url, {
+                'content': 'ROLLBACK_IMPORT=value', 'classifications': {'ROLLBACK_IMPORT': 'standard'},
+                'confirm': True, 'preview_token': preview.json()['preview_token'],
+            }, format='json')
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(EnvironmentVariable.objects.filter(environment=self.environment, key='ROLLBACK_IMPORT').exists())
+        from .models import EnvironmentVariableVersion
+        self.assertFalse(EnvironmentVariableVersion.objects.filter(variable_key='ROLLBACK_IMPORT').exists())
 

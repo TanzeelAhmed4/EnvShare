@@ -1,54 +1,48 @@
 # EnvShare project status
 
-## Current state
+**Status as of 2026-11-11:** Batches 1–4 and the final security fixes are implemented in the local working tree. EnvShare has not been deployed and is **not production-certified**. PostgreSQL and Redis integration checks and deployment-dependent verification remain outstanding.
 
-EnvShare implements a local course-project workflow for account sessions, projects, project membership, three environments, Standard and Sensitive variables, `.env` import preview/confirmation, and variable audit history. It has not been deployed and is not production-ready or production-certified.
+## Implemented scope
 
-### Security behavior in the current source
+- Registration, login, logout, session authentication, CSRF handling, Argon2-preferred password hashing, login/registration throttling, and authentication audit events.
+- Private projects with Owner, Admin, Manager, and Member roles. Backend permissions protect project data and membership operations. Only the Owner can manage Admin membership; Admins manage Managers and Members.
+- Development, Staging, and Production environments; Standard and Sensitive variables; AES-GCM Sensitive storage and authorized reveal.
+- Encrypted version snapshots for Standard and Sensitive values, version comparison and restoration, and encrypted deletion snapshots. Deleted-variable history is retained internally but not accessible through normal API routes.
+- Single-use, expiring, email-bound invitations with hashed token storage and transactional acceptance. Invitation email sending is not implemented.
+- `.env` import preview and explicit confirmation; paginated, filtered variable and project-access audit APIs.
+- SQLite development support, environment-based PostgreSQL settings, project/environment write-locking, production configuration validation, Redis cache configuration, security middleware, structured logs, and liveness/readiness routes.
 
-- Signup, login, logout, CSRF-token, and current-user endpoints use Django sessions and CSRF protection for mutations. Argon2 is the first configured password hasher.
-- Login has independent controls: 5 requests per client IP per minute and a username-based failed-password bucket allowing 5 failures within 15 minutes before a 60-second cooldown. Cache keys contain an HMAC digest of an NFKC-normalized, trimmed, lowercase username, not the raw username or password. Successful authentication clears that username's failure and cooldown keys. Registration has a separate 5-per-hour client-IP throttle.
-- Login uses Django's `username__iexact` lookup to resolve case variants to the stored username before calling Django authentication. Usernames and non-empty emails have case-insensitive uniqueness constraints using `Lower`. These Django ORM lookups and constraints can map to PostgreSQL, but only SQLite is configured here and PostgreSQL behavior has not been runtime-tested.
-- Sensitive values are encrypted using AES-256-GCM, a random 12-byte nonce, and associated data bound to the environment identifier and variable key. Ordinary serializers mask them. Standard values are stored as plaintext.
-- A successful Sensitive reveal is audited as action `revealed` with actor, project, environment, variable ID/key, and timestamp. The event's changes object is empty; plaintext is not passed to the audit recorder. Audit persistence happens before returning plaintext, and a failed audit write produces a generic 503 response without the value. Invalid access, missing variables, Standard variables, and decryption failures do not create reveal events.
-- Variable mutations and their audit rows are transactional. Audit changes redact Sensitive values. Audit history is scoped to projects visible to the requesting owner/member.
-- The frontend's `AuditEvent` union includes `revealed`; `EnvironmentVariables` invokes its audit-change callback only after reveal succeeds, causing the parent workspace's audit refresh token to change and the timeline to fetch again.
+## Latest local verification
 
-Migration `backend/projects/migrations/0004_reveal_audit_action.py` depends on project migration `0003_environmentvariableauditevent` and alters the existing `action` choices to add `revealed`. The model choice and migration agree. It adds no column and does not change the field's `max_length`.
+These results are from the latest recorded implementation checks. PostgreSQL/Redis service behavior and hosting behavior were not established by the local tests.
 
-## Verification status
-
-Dates below use the project/client date context, 2026-11-08. These entries distinguish reported history from commands actually run in the latest verification session.
-
-| Check | Result | Evidence and limits |
+| Check | Result | Scope and limits |
 |---|---|---|
-| Full backend suite | **79 passed, reported** | The independent security-review report says all 79 passed. The suite was not rerun during documentation work. |
-| Django `check` and migration dry-run | **Previously reported passed; latest attempt unavailable** | An earlier report says both passed. The recent attempt used system Python and failed before Django started (`ModuleNotFoundError`). The requested root-level `backend.venv` path was absent. This inspection found the existing `backend\.venv\Scripts\python.exe` and verified Django 6.1.3 imports, but did not rerun checks or tests with it. |
-| Frontend tests | **PASS, most recent run** | `npm.cmd test` passed 5 auth-session response assertions. |
-| TypeScript check | **PASS, most recent run** | `npm.cmd run check` completed `tsc -b --pretty false` successfully. |
-| Production build | **FAIL, most recent run** | `npm.cmd run build`: TypeScript completed, then Vite/esbuild failed to spawn with `spawn EPERM`. This is an execution-environment failure; no successful build was established by that run. |
-| `git diff --check` | **PASS, most recent run** | No whitespace errors; Git printed line-ending conversion warnings. |
+| Backend test suite | **139 tests discovered; 134 passed, 5 skipped** | Ran with SQLite. The five skipped tests are PostgreSQL-specific concurrency/integration tests because no PostgreSQL service was available. SQLite concurrency tests ran; they do not verify PostgreSQL locking. |
+| PostgreSQL integration | **Pending** | PostgreSQL was unavailable at `127.0.0.1:5432`; no PostgreSQL service was installed for this check. |
+| Redis shared-cache integration | **Pending** | Redis was unavailable at `127.0.0.1:6379`. Local cache/tests do not establish multi-worker Redis behavior. |
+| Frontend tests | **Passed** | `npm.cmd test` completed the auth, invitation-link, CSRF, API-configuration, and audit-filter assertions. The current script does not print an assertion count. |
+| TypeScript | **Passed** | `tsc --noEmit --pretty false` completed successfully. |
+| Django checks | **Passed** | `manage.py check` reported no issues. |
+| Migration consistency | **Passed** | `makemigrations --check --dry-run` reported no changes. |
+| Vite production bundling | **Passed in both modes** | Vite production-mode build and `vite build --mode development` completed with a valid HTTPS API URL, writing to temporary output directories. The overridden-mode build without an API URL failed during configuration as intended. |
+| Combined `npm run build` | **Not confirmed as one command** | A sandboxed attempt passed its TypeScript phase but Vite/esbuild could not spawn (`EPERM`). TypeScript and Vite bundling were subsequently verified separately. |
+| `git diff --check` | **Passed** | No whitespace errors; Git emitted line-ending conversion warnings. |
 
-The independent review also reported 79 backend tests passing and frontend test/type checks passing. That report did not establish a production build result. Older README/phase notes recorded 59, 65, and 71 tests from earlier checkpoints; those counts are superseded by the latest reported count of 79 and are retained here only as historical context, not current test status.
+## Deployment-dependent work
 
-No tests were rerun during this documentation update. The backend test modules declare 79 test functions/methods by source inspection; declaration count is not itself a test execution result.
+- Run the five PostgreSQL-specific tests against a real, disposable PostgreSQL test service and verify production migrations, locking, TLS certificate validation, backups, and restoration.
+- Run throttling and health-check tests against the configured Redis service with the intended multi-worker deployment.
+- Verify HTTPS termination, trusted proxy behavior, allowed hosts, CORS/CSRF origins, cookie behavior, and the frontend/API site topology.
+- Configure CSP response headers on the static frontend host; Django's response middleware does not set headers on a separately served React document.
+- Verify production secret delivery, log collection/redaction and retention, monitoring, static hosting, and health probes.
+- Test database-plus-key recovery in an isolated environment. The repository does not implement key rotation or automatic backup/recovery.
 
-## Scope and missing functionality
+## Known limitations and risks
 
-Implemented: authentication, project creation and creator-managed registered membership, owner/member project access, environment/variable CRUD, Sensitive reveal, import preview/confirmation, audit history, and basic responsive React UI.
-
-Not implemented or not verified: hosted deployment; production database support/configuration; browser end-to-end tests; email verification or password reset; MFA; project update/delete UI/API; encryption-key rotation/recovery; off-site/tamper-proof audit retention; multi-worker shared-cache operation. The current project list/detail supports creating and reading projects; membership administration is creator-only. No additional member role hierarchy exists.
-
-## Remaining production risks
-
-- **Shared throttling cache:** Django's current default cache is local-memory/process-local. IP and username throttle counters are not coordinated across multiple workers. Configure and test a shared Redis cache (or an equivalent shared backend) before multi-worker deployment.
-- **Repeated cooldown denial of service:** an attacker who knows a username can repeatedly submit enough wrong passwords after each 60-second cooldown expires, continuing to block that account temporarily. This is an acknowledged account-targeted denial-of-service risk.
-- **Database operations:** settings hard-code SQLite. Select and configure a production database, then validate migrations, locking, backups, restore, capacity, and operational monitoring.
-- **Encryption key recovery:** the AES key is external process configuration. There is no rotation or recovery workflow. Back up and restrict access to the existing key; losing or replacing it makes stored Sensitive values unreadable.
-- **HTTPS and deployment:** production mode requires explicit host/origin/secret/key configuration and HTTPS CORS origins, turns on secure cookies and SSL redirect, and configures HSTS. Actual TLS termination, proxy behavior, domain coverage, HSTS subdomain/preload choices, secret delivery, static assets, and deployment automation remain unimplemented/unverified.
-- **Audit durability:** audit rows are application-level and mutable by database operators; they cascade with project deletion and are not exported to an independent append-only store.
-- **Validation coverage:** the frontend suite is small and no browser-level integration/E2E suite exists. A prior production build attempt failed at process spawn.
-
-## Next work
-
-Complete the local browser demonstration and submission checklist. Verify signup/login, owner/member permissions, project and environment navigation, variable CRUD, Sensitive masking/reveal plus timeline refresh, import confirmation, and audit history. Rerun backend tests/checks/migration dry-run with `backend\.venv\Scripts\python.exe`, rerun frontend tests/type check, and obtain a successful production build in an environment that permits esbuild child-process startup. Deployment remains out of scope unless separately authorized.
+- Losing or replacing `ENVSHARE_ENCRYPTION_KEY` makes encrypted current Sensitive values and all historical snapshots unreadable.
+- A known username can be repeatedly targeted after each failed-login cooldown expires, temporarily denying that account login.
+- Audit APIs are read-only, but audit rows are not tamper-proof against database operators and are not exported to an independent append-only store.
+- Project/variable deletion retains audit/version snapshot data internally; normal project-scoped APIs do not expose deleted-resource history.
+- There is no MFA, password reset, email verification, invitation email delivery, or browser end-to-end suite.
+- Production configuration checks are application guardrails. They do not certify a particular host, proxy, database, cache, email service, or recovery process.

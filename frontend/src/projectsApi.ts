@@ -1,4 +1,5 @@
 import { apiRequest } from './authApi';
+import { serializeAuditFilters } from './auditFilters';
 
 export type Project = {
   id: number;
@@ -68,7 +69,7 @@ export type ImportPreview = {
   preview_token: string;
 };
 
-export type AuditChange = { before: string | null; after: string | null };
+export type AuditChange = { before: string | number | boolean | null; after: string | number | boolean | null };
 export type AuditEvent = {
   id: number;
   project_name: string;
@@ -79,7 +80,7 @@ export type AuditEvent = {
   action: 'created' | 'updated' | 'deleted' | 'revealed' | 'restored' | 'version_accessed' | 'version_compared';
   action_label: string;
   actor: string;
-  changes: { key?: AuditChange; sensitivity?: AuditChange; value?: AuditChange };
+  changes: Record<string, AuditChange>;
   created_at: string;
 };
 
@@ -92,6 +93,12 @@ export type AccessAuditEvent = {
   id: number; actor_username: string; action: string; target_email: string; target_username: string;
   role_before: string; role_after: string; created_at: string;
 };
+export type AuditFilters = {
+  search?: string; action?: string; actor?: string; environment?: number | ''; date_from?: string; date_to?: string;
+  page?: number; page_size?: number;
+};
+export type AuditPage<T> = { count: number; next: string | null; previous: string | null; page: number; page_size: number; results: T[] };
+
 
 export const projectsApi = {
   list: () => apiRequest<Project[]>('/projects/'),
@@ -172,6 +179,10 @@ export const projectsApi = {
       `/projects/${projectId}/environments/${environmentId}/import/confirm/`,
       { method: 'POST', body: JSON.stringify({ content, classifications, confirm: true, preview_token: previewToken }) },
     ),
-  auditHistory: (projectId: number) => apiRequest<AuditEvent[]>(`/projects/${projectId}/audit/`),
-  accessAuditHistory: (projectId: number) => apiRequest<AccessAuditEvent[]>(`/projects/${projectId}/access-audit/`),
+  auditHistory: (projectId: number, filters: AuditFilters = {}) => apiRequest<AuditPage<AuditEvent>>(
+    `/projects/${projectId}/audit/${serializeAuditFilters(filters)}`,
+  ),
+  accessAuditHistory: (projectId: number, filters: AuditFilters = {}) => apiRequest<AuditPage<AccessAuditEvent>>(
+    `/projects/${projectId}/access-audit/${serializeAuditFilters(filters)}`,
+  ),
 };

@@ -1,56 +1,86 @@
-# EnvShare
+# EnvShare – Team Environment Variable Manager
 
-EnvShare is a local course project for sharing project environment variables with registered teammates. It combines a Django REST Framework API with a React and TypeScript client. It is intended for local demonstration and course submission; it has not been deployed and is not certified production-ready.
+EnvShare is a web app for teams to organize project environment variables by environment. It gives collaborators controlled access to shared configuration, masks Sensitive values in normal views, and records changes for review.
 
-## Implemented features
+## Features
 
-- Session-based signup, login, logout, current-user lookup, CSRF protection, and Argon2-preferred password hashing.
-- Login request limiting by client IP (5 requests per minute), plus a separate failed-password counter keyed by an HMAC of the normalized username (5 failures in 15 minutes, then a 60-second cooldown). Registration is limited to 5 attempts per client IP per hour.
-- Case-insensitive username and email uniqueness constraints. Login resolves username case variants with Django's `username__iexact` lookup before invoking Django authentication. This uses Django ORM expressions; PostgreSQL is not configured or runtime-tested in this project.
-- Projects with a creator and registered members. Creators manage membership; creators and members can view and edit project data. There are no additional member roles.
-- Development, Staging, and Production environments created with each project.
-- Standard and Sensitive variables with key validation and per-environment uniqueness. Sensitive values use AES-256-GCM at rest and are masked in ordinary API responses.
-- Authorized reveal through a dedicated endpoint. Each successful Sensitive reveal records a `revealed` audit event before returning plaintext. The event records context only and has an empty changes object. If the audit write fails, the API withholds plaintext. Failed, unauthorized, missing, Standard-variable, and decryption-failure requests do not create a reveal event.
-- `.env` parsing, preview, and explicit confirmation. New entries require a classification; existing classifications are retained. Sensitive values are masked in previews. The signed preview is bound to the user, project, environment, input, and current variable state and expires after 15 minutes.
-- Application audit history for variable create, update, delete, import, and reveal activity. Sensitive before/after values are redacted. The frontend timeline refreshes after a successful reveal.
-- Frontend handling for expired authentication sessions.
+- Session-based registration, login, logout, and CSRF-protected API requests.
+- Private projects with Owner, Admin, Manager, and Member roles.
+- Development, Staging, and Production environments for each project.
+- Standard and Sensitive variables, with AES-GCM encryption for Sensitive values at rest and authorized reveal.
+- Encrypted version snapshots for both classifications, with history, comparison, and restoration. Deleted-variable history is retained internally but is unavailable through normal API routes.
+- Single-use, expiring, email-bound team invitations. Invitation email delivery is not implemented.
+- `.env` import preview with New, Update, and Unchanged results, followed by explicit confirmation.
+- Project, membership, variable, import, and authentication audit events, with project-scoped filters and server-side pagination.
 
-## Stack and layout
+## Roles
 
-- Backend: Python, Django 6.1.3, Django REST Framework 3.18.3; local database configuration is SQLite.
-- Frontend: React 18, TypeScript 5.6, Vite 6.4.5, Tailwind CSS and project styles.
-- Key paths: `backend/accounts/`, `backend/projects/`, `backend/config/`, `frontend/src/`, `frontend/tests/`, and `docs/`.
-- Migration `backend/projects/migrations/0004_reveal_audit_action.py` adds the `revealed` audit action to the choices for the existing audit action field. It is additive and follows migration `0003_environmentvariableauditevent.py`.
+| Role | Project permissions |
+|---|---|
+| Owner | Full project control, including assigning Admins, managing all memberships, and deleting the project. The owner is represented by `Project.creator`. |
+| Admin | Manage project data and invitations; manage Managers and Members. Admins cannot change the Owner or manage another Admin. |
+| Manager | Create, edit, import, delete, reveal, and review project variables and audit history. Cannot manage membership. |
+| Member | View project variables and audit history. Sensitive values remain masked without reveal permission. |
 
-The encryption key is supplied through the Django process environment and is not stored in the database or source. See [the architecture](docs/ARCHITECTURE.md), [development guide](docs/DEVELOPMENT_GUIDE.md), and [project status](docs/PROJECT_STATUS.md).
+## Technology and architecture
 
-## Run locally on Windows
+- **Frontend:** React 18, TypeScript, Vite, Tailwind CSS.
+- **Backend:** Python, Django 6.1, Django REST Framework.
+- **Data:** SQLite for local development; environment-configured PostgreSQL support.
+- **Security:** Django sessions and CSRF protection; AES-256-GCM encryption; role checks on backend endpoints; rate limiting; audit events; production security settings and health endpoints.
 
-This checkout has an existing virtual environment at `backend\.venv`. From the project root, start the backend with:
+The browser app calls the Django REST API using session cookies and a CSRF token. The backend applies project membership permissions, stores project and environment data, and uses the configured database. Sensitive current values and all historical snapshots are encrypted with a Base64-encoded 32-byte key supplied to the backend process. Standard current values are stored as plaintext. See [Architecture](docs/ARCHITECTURE.md) for data flows and security boundaries.
+
+## Local setup
+
+The commands below use Windows PowerShell. See the [development guide](docs/DEVELOPMENT_GUIDE.md) for prerequisites, environment setup, migration instructions, and troubleshooting.
+
+From the repository root, start Django:
 
 ```powershell
-.\backend\.venv\Scripts\python.exe backend\manage.py runserver 127.0.0.1:8000
+.\backend\.venv\Scripts\python.exe backend\manage.py migrate
+.\backend\.venv\Scripts\python.exe backend\manage.py runserver localhost:8000
 ```
 
-In a second PowerShell window, run:
+In a second terminal:
 
 ```powershell
 Set-Location frontend
 npm.cmd run dev -- --host localhost --port 5173
 ```
 
-Open `http://localhost:5173`. Configure required development environment variables in the process before starting Django. Settings read process environment variables; they do not load `.env` files themselves. For details and test commands, see [docs/DEVELOPMENT_GUIDE.md](docs/DEVELOPMENT_GUIDE.md).
+Then open `http://localhost:5173`. Django reads process environment variables; it does not load `.env` files. Preserve the same `ENVSHARE_ENCRYPTION_KEY` for the lifetime of a database containing variable history.
 
-## Verification record
+## Tests and checks
 
-The most recent independent security-review report states that all 79 backend tests passed. That result is reported history, not a rerun during the documentation inspection. The latest frontend test and TypeScript commands passed (5 session assertions and `tsc -b --pretty false`). The latest production build attempt failed when esbuild could not spawn (`spawn EPERM`); TypeScript compilation inside the build completed before that failure. The latest Django commands attempted with the active system Python could not import Django. The root-level path `backend.venv` that was requested for a retry does not exist; this inspection found `backend\.venv\Scripts\python.exe` and verified it imports Django 6.1.3, but did not rerun the suite with it. See [PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the full dated status and limits.
+From the repository root:
 
-## Important limitations
+```powershell
+.\backend\.venv\Scripts\python.exe -B backend\manage.py test
+.\backend\.venv\Scripts\python.exe -B backend\manage.py check
+.\backend\.venv\Scripts\python.exe -B backend\manage.py makemigrations --check --dry-run
+```
 
-- No hosted deployment, production database configuration, browser end-to-end suite, password reset, email verification, MFA, or key rotation/recovery is implemented.
-- Django is configured to use SQLite. A production database and its operational procedures remain to be selected and verified.
-- The default Django cache is process-local. Throttling state is not shared between workers; configure and verify a shared cache such as Redis before multi-worker deployment.
-- Username cooldowns can be repeatedly retriggered after expiry by anyone who knows the target username, temporarily denying that account login.
-- Preserve and securely back up the existing encryption key. Loss or replacement makes existing Sensitive values unreadable; recovery and rotation are not implemented.
-- Production requires HTTPS and explicit secure deployment configuration. Hosting, TLS termination, secret provisioning, backups, monitoring, and deployment automation are not supplied.
-- Audit history is application-level, not tamper-proof or independently retained, and project deletion cascades to project audit events.
+From `frontend\`:
+
+```powershell
+npm.cmd test
+npm.cmd run check
+npm.cmd run build
+```
+
+The latest recorded local run discovered 139 backend tests: 134 passed and 5 PostgreSQL-specific tests were skipped. Frontend tests, TypeScript validation, Django checks, migration consistency, and Vite production bundling passed; see [Project status](docs/PROJECT_STATUS.md) for the conditions and limitations of those checks.
+
+## Configuration and deployment
+
+See [Local development](docs/DEVELOPMENT_GUIDE.md), [Production deployment](docs/PRODUCTION_DEPLOYMENT.md), and [Backup and recovery](docs/BACKUP_RECOVERY.md). Production configuration requires PostgreSQL, Redis, explicit secrets and origins, and a production WSGI/ASGI entry point. These settings do not make a deployment production-certified.
+
+## Known limitations and status
+
+- PostgreSQL concurrency tests have not run against a real PostgreSQL service; Redis shared-cache behavior has not been integration-tested.
+- Hosting, TLS termination, proxy behavior, frontend-host CSP, monitoring, and recovery procedures require deployment-specific verification.
+- There is no MFA, password reset, email verification, invitation email delivery, encryption-key rotation/recovery, browser E2E suite, or independent append-only audit store.
+- Database operators can alter audit rows. Losing or replacing the encryption key makes encrypted current/history values unreadable.
+- Username cooldowns can be repeatedly retriggered for a known account, temporarily preventing login.
+
+**Project status:** Batches 1–4 and the final security fixes are implemented locally. EnvShare is **not production-certified**. PostgreSQL and Redis integration verification and deployment-level checks remain pending.

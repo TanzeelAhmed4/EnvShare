@@ -3,3 +3,5 @@ djangorestframework==3.18.3
 django-cors-headers==4.9.0
 argon2-cffi==25.1.0
 cryptography==46.0.3
+psycopg[binary]==3.2.10
+redis==5.2.1

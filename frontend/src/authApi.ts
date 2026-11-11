@@ -1,4 +1,5 @@
 import { isAuthSessionExpired } from './authSession';
+import { csrfTokenFromResponse } from './csrfToken';
 
 export type AuthUser = {
   id: number;
@@ -22,11 +23,6 @@ export function onSessionExpired(handler: () => void): () => void {
   };
 }
 
-function readCookie(name: string): string | null {
-  const entry = document.cookie.split('; ').find((part) => part.startsWith(`${name}=`));
-  return entry ? decodeURIComponent(entry.split('=').slice(1).join('=')) : null;
-}
-
 async function csrfToken(): Promise<string> {
   let response: Response;
   try {
@@ -34,10 +30,7 @@ async function csrfToken(): Promise<string> {
   } catch {
     throw new Error('Cannot connect to EnvShare. Make sure the backend is running.');
   }
-  if (!response.ok) throw new Error('Could not start a secure session. Refresh and try again.');
-  const token = readCookie('csrftoken');
-  if (!token) throw new Error('The browser did not accept the security cookie. Check local cookie settings.');
-  return token;
+  return csrfTokenFromResponse(response);
 }
 
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
