@@ -11,7 +11,10 @@ TEST_ENCRYPTION_KEY = base64.urlsafe_b64encode(b'T' * 32).decode('ascii')
 User = get_user_model()
 
 
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'U' * 32).decode('ascii'),
+)
 class EnvironmentVariableApiTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(
@@ -76,7 +79,6 @@ class EnvironmentVariableApiTests(TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.json()['value'], 'https://service.example')
         variable = EnvironmentVariable.objects.get(environment=self.development, key='SERVICE_URL')
-
         self.authenticate_as(self.member)
         listed = self.client.get(self.variable_list_url())
         detail = self.client.get(self.variable_detail_url(variable))
@@ -94,6 +96,39 @@ class EnvironmentVariableApiTests(TestCase):
 
         deleted = self.client.delete(self.variable_detail_url(variable))
         self.assertEqual(deleted.status_code, 204)
+
+    def test_standard_creation_does_not_require_sensitive_encryption(self):
+        self.authenticate_as(self.owner)
+        with self.settings(ENVSHARE_ENCRYPTION_KEY=''):
+            response = self.client.post(
+                self.variable_list_url(),
+                {'key': 'PUBLIC_SETTING', 'value': 'visible', 'sensitivity': 'standard'},
+                format='json',
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()['value'], 'visible')
+        self.assertEqual(response.json()['sensitivity'], 'standard')
+
+    def test_encryption_status_is_safe_and_reflects_validity(self):
+        self.authenticate_as(self.owner)
+        with self.settings(ENVSHARE_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY):
+            available = self.client.get('/api/projects/encryption-status/')
+        self.assertEqual(available.json(), {
+            'available': True, 'reason': None,
+            'standard_history_available': True, 'standard_history_reason': None,
+        })
+        with self.settings(ENVSHARE_ENCRYPTION_KEY='bad-key-material'):
+            unavailable = self.client.get('/api/projects/encryption-status/')
+        self.assertEqual(unavailable.json(), {
+            'available': False, 'reason': 'invalid_configuration',
+            'standard_history_available': True, 'standard_history_reason': None,
+        })
+        self.assertNotIn('key', str(unavailable.json()).lower())
+        with self.settings(ENVSHARE_HISTORY_ENCRYPTION_KEY=''):
+            history_unavailable = self.client.get('/api/projects/encryption-status/')
+        self.assertFalse(history_unavailable.json()['standard_history_available'])
+        self.assertEqual(history_unavailable.json()['standard_history_reason'], 'not_configured')
+
         self.authenticate_as(self.owner)
         self.assertEqual(self.client.get(self.variable_list_url()).json(), [])
 

@@ -6,7 +6,10 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from .encryption import EncryptionError, decrypt_historical_value
+from .encryption import (
+    EncryptionError, _encrypt_with_context, decrypt_historical_value,
+    encrypt_historical_value, historical_associated_data,
+)
 from .models import (
     Environment,
     EnvironmentVariable,
@@ -20,7 +23,10 @@ User = get_user_model()
 TEST_KEY = base64.urlsafe_b64encode(b'V' * 32).decode('ascii')
 
 
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'W' * 32).decode('ascii'),
+)
 class EnvironmentVariableVersionTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='version-owner', email='v-owner@example.test')
@@ -59,7 +65,7 @@ class EnvironmentVariableVersionTests(TestCase):
         variable = self.create_variable(value=value)
         first = EnvironmentVariableVersion.objects.get(variable=variable)
         self.assertEqual((first.version_number, first.action, first.variable_key, first.sensitivity), (1, 'created', 'SERVICE_URL', 'standard'))
-        self.assertTrue(first.encrypted_value.startswith('aesgcm:v1:'))
+        self.assertTrue(first.encrypted_value.startswith('aesgcm:standard-history:v3:'))
         self.assertNotIn(value, first.encrypted_value)
         self.assertEqual(decrypt_historical_value(first), value)
 
@@ -77,8 +83,7 @@ class EnvironmentVariableVersionTests(TestCase):
         self.assertEqual(decrypt_historical_value(versions[1]), 'second-value')
         self.assertEqual(decrypt_historical_value(versions[2]), 'second-value')
         self.assertEqual(decrypt_historical_value(versions[3]), 'second-value')
-        nonces = [item.encrypted_value.removeprefix('aesgcm:v1:')[:16] for item in versions]
-        self.assertEqual(len(set(nonces)), len(nonces))
+        self.assertTrue(versions[3].encrypted_value.startswith('aesgcm:v1:'))
 
     def test_sensitive_history_is_encrypted_masked_and_audited_before_reveal(self):
         secret = 'historical-sensitive-marker'
@@ -100,7 +105,7 @@ class EnvironmentVariableVersionTests(TestCase):
         self.assertNotIn(secret, str(event.changes))
 
     def test_wrong_historical_context_fails_authentication(self):
-        variable = self.create_variable(key='CONTEXT_KEY', value='context-bound')
+        variable = self.create_variable(key='CONTEXT_KEY', value='context-bound', sensitivity='sensitive')
         version = EnvironmentVariableVersion.objects.get(variable=variable)
         version.variable_key = 'SUBSTITUTED_KEY'
         with self.assertRaises(EncryptionError):
@@ -109,6 +114,13 @@ class EnvironmentVariableVersionTests(TestCase):
         version.version_number += 1
         with self.assertRaises(EncryptionError):
             decrypt_historical_value(version)
+
+    def test_legacy_encrypted_standard_snapshot_remains_decryptable(self):
+        variable = self.create_variable(key='LEGACY_STANDARD', value='legacy-value')
+        version = EnvironmentVariableVersion.objects.get(variable=variable)
+        version.encrypted_value = _encrypt_with_context('legacy-value', historical_associated_data(version))
+        version.save(update_fields=['encrypted_value'])
+        self.assertEqual(decrypt_historical_value(version), 'legacy-value')
 
     def test_standard_comparison_returns_diff_sensitive_comparison_only_metadata(self):
         variable = self.create_variable(value='alpha\nkeep')
@@ -241,13 +253,14 @@ class EnvironmentVariableVersionTests(TestCase):
             EnvironmentVariableVersion.objects.filter(variable_id_snapshot=variable_id).count(), 2,
         )
 
-    def test_history_encryption_failure_rolls_back_standard_variable_creation(self):
+    def test_standard_variable_creation_fails_safely_without_history_encryption_key(self):
         self.authenticate(self.owner)
-        with self.settings(ENVSHARE_ENCRYPTION_KEY=''):
+        with self.settings(ENVSHARE_HISTORY_ENCRYPTION_KEY=''):
             response = self.client.post(
                 self.variables_url(), {'key': 'ROLLBACK', 'value': 'not-stored', 'sensitivity': 'standard'}, format='json',
             )
         self.assertEqual(response.status_code, 503)
+        self.assertNotIn('not-stored', response.content.decode())
         self.assertFalse(EnvironmentVariable.objects.filter(environment=self.environment, key='ROLLBACK').exists())
         self.assertFalse(EnvironmentVariableVersion.objects.exists())
 

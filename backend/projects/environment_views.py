@@ -15,7 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .audit import _MISSING, record_variable_audit
-from .encryption import EncryptionError, decrypt_value, encrypt_value
+from .encryption import EncryptionError, decrypt_value, encrypt_value, encryption_configuration_status
 from .env_import import parse_env_content
 from .environment_serializers import EnvironmentSerializer, EnvironmentVariableSerializer
 from .models import Environment, EnvironmentVariable, EnvironmentVariableAuditEvent, EnvironmentVariableVersion
@@ -45,6 +45,13 @@ def lock_project_environment_for_write(request, project, environment, permission
 
 def encryption_error_response(error):
     return Response({'detail': str(error)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class EncryptionConfigurationStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(encryption_configuration_status())
 
 
 class ProjectEnvironmentListView(APIView):

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import base64
 from threading import Barrier
 from unittest import skipUnless
 
@@ -26,7 +27,10 @@ POSTGRES_AVAILABLE = connection.vendor == 'postgresql'
 
 
 @skipUnless(POSTGRES_AVAILABLE, 'requires a real PostgreSQL test database')
-@override_settings(ENVSHARE_ENCRYPTION_KEY='V' * 43 + '=')
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY='V' * 43 + '=',
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'P' * 32).decode('ascii'),
+)
 class PostgreSQLConcurrencyIntegrationTests(TransactionTestCase):
     reset_sequences = True
 

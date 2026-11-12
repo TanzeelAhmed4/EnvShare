@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Eye, EyeOff, GitCompare, History, KeyRound, LoaderCircle, LockKeyhole, Pencil, Plus, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react';
-import { Environment, ImportPreview, ProjectVariable, VariableVersion, VariableVersionComparison, projectsApi } from './projectsApi';
+import { EncryptionStatus, Environment, ImportPreview, ProjectVariable, VariableVersion, VariableVersionComparison, projectsApi } from './projectsApi';
 
 type Props = {
   projectId: number;
@@ -33,6 +33,14 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
   const [historicalValue, setHistoricalValue] = useState<Record<number, string>>({});
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [encryptionStatus, setEncryptionStatus] = useState<EncryptionStatus | null>(null);
+
+  async function refreshEncryptionStatus() {
+    try { setEncryptionStatus(await projectsApi.encryptionStatus()); }
+    catch { setEncryptionStatus(null); }
+  }
+
+  useEffect(() => { void refreshEncryptionStatus(); }, []);
 
   useEffect(() => {
     if (!selectedEnvironmentId) return;
@@ -50,6 +58,7 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
   }, [projectId, selectedEnvironmentId, reload]);
 
   function startCreate() {
+    void refreshEncryptionStatus();
     setSelectedSensitivity('standard');
     setReplaceSensitiveValue(false);
     setEditor('new');
@@ -175,6 +184,7 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
   }
 
   function openImport() {
+    void refreshEncryptionStatus();
     setImportContent('');
     setImportPreview(null);
     setImportClassifications({});
@@ -268,7 +278,11 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
         {historyComparison && <div className="import-preview"><h3>Comparison: v{historyComparison.left_version} → v{historyComparison.right_version}</h3>{historyComparison.sensitive ? <p>{historyComparison.different ? 'Sensitive values differ. Their contents are not shown.' : 'Sensitive values are identical. Their contents are not shown.'}</p> : <pre className="import-source">{historyComparison.diff?.join('\n') || 'No differences.'}</pre>}</div>}
       </section></div>}
       {importOpen && <div className="modal-backdrop" role="presentation"><section className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="env-import-title"><button className="modal-close" onClick={() => setImportOpen(false)} aria-label="Close import">×</button><span className="form-eyebrow">BULK CONFIGURATION</span><h2 id="env-import-title">Import .env values</h2><p className="modal-copy">Preview changes for {activeEnvironment?.label ?? 'this environment'}. Nothing is saved until you confirm.</p><label className="import-label" htmlFor="env-import-content">Paste .env content</label><textarea id="env-import-content" className="import-source" rows={7} spellCheck={false} placeholder={'API_URL=https://example.com\nFEATURE_FLAG="enabled"'} value={importContent} onChange={(event) => { setImportContent(event.target.value); setImportPreview(null); setImportClassifications({}); }} />
-        {importPreview && <div className="import-preview" aria-live="polite"><h3>Import preview <span>{importPreview.preview.length} entries</span></h3>{importPreview.invalid_lines.length > 0 && <div className="import-invalid" role="alert"><strong>Fix these lines before saving</strong>{importPreview.invalid_lines.map((item) => <p key={`${item.line}-${item.message}`}>Line {item.line}: {item.message}</p>)}</div>}{importPreview.preview.length === 0 ? <p className="import-empty">No valid variable entries found.</p> : <div className="import-preview-list">{importPreview.preview.map((item) => { const classification = importClassifications[item.key]; const newValue = item.classification === 'New' && classification !== 'standard' ? '••••••••' : item.new_value; return <article className="import-preview-row" key={item.key}><div className="import-preview-top"><code>{item.key}</code><span className={`import-classification ${item.classification.toLowerCase()}`}>{item.classification}</span></div>{item.classification === 'Update' ? <div className="import-values"><div><small>Old value</small><code>{item.old_value}</code></div><div><small>New value</small><code>{item.new_value}</code></div></div> : item.classification === 'New' ? <div className="import-new-value"><code>{newValue}</code><label>Classification<select value={classification ?? ''} onChange={(event) => { const value = event.target.value as 'standard' | 'sensitive'; const next = { ...importClassifications, [item.key]: value }; setImportClassifications(next); void previewImport(next); }}><option value="" disabled>Choose…</option><option value="standard">Standard</option><option value="sensitive">Sensitive</option></select></label></div> : <div className="import-unchanged-value"><small>Unchanged</small><code>{item.new_value}</code></div>}</article>; })}</div>}</div>}
+      {importOpen && encryptionStatus && <>
+        {!encryptionStatus.standard_history_available && <p className="sensitivity-warning" role="status">{encryptionStatus.standard_history_reason === 'invalid_configuration' ? 'Standard variable history encryption is unavailable because the server key is invalid. Standard imports cannot be saved until it is corrected.' : 'Standard variable history encryption is not configured. Standard imports cannot be saved until it is configured.'}</p>}
+        {!encryptionStatus.available && <p className="sensitivity-warning" role="status">{encryptionStatus.reason === 'invalid_configuration' ? 'Sensitive value encryption is unavailable because the server key is invalid. Sensitive imports cannot be saved.' : 'Sensitive value encryption is not configured. Sensitive imports cannot be saved.'}</p>}
+      </>}
+      {importPreview && <div className="import-preview" aria-live="polite"><h3>Import preview <span>{importPreview.preview.length} entries</span></h3>{importPreview.invalid_lines.length > 0 && <div className="import-invalid" role="alert"><strong>Fix these lines before saving</strong>{importPreview.invalid_lines.map((item) => <p key={`${item.line}-${item.message}`}>Line {item.line}: {item.message}</p>)}</div>}{importPreview.preview.length === 0 ? <p className="import-empty">No valid variable entries found.</p> : <div className="import-preview-list">{importPreview.preview.map((item) => { const classification = importClassifications[item.key]; const newValue = item.classification === 'New' && classification !== 'standard' ? '••••••••' : item.new_value; return <article className="import-preview-row" key={item.key}><div className="import-preview-top"><code>{item.key}</code><span className={`import-classification ${item.classification.toLowerCase()}`}>{item.classification}</span></div>{item.classification === 'Update' ? <div className="import-values"><div><small>Old value</small><code>{item.old_value}</code></div><div><small>New value</small><code>{item.new_value}</code></div></div> : item.classification === 'New' ? <div className="import-new-value"><code>{newValue}</code><label>Classification<select value={classification ?? ''} onChange={(event) => { const value = event.target.value as 'standard' | 'sensitive'; const next = { ...importClassifications, [item.key]: value }; setImportClassifications(next); void previewImport(next); }}><option value="" disabled>Choose…</option><option value="standard">Standard</option><option value="sensitive">Sensitive</option></select></label></div> : <div className="import-unchanged-value"><small>Unchanged</small><code>{item.new_value}</code></div>}</article>; })}</div>}</div>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="modal-actions"><button className="workspace-secondary" type="button" onClick={() => setImportOpen(false)}>Cancel</button>{!importPreview ? <button className="workspace-primary" type="button" onClick={() => void previewImport()} disabled={busy || !importContent.trim()}>{busy ? 'Preparing…' : 'Preview import'}</button> : <button className="workspace-primary" type="button" onClick={() => void confirmImport()} disabled={busy || importPreview.invalid_lines.length > 0 || importPreview.preview.length === 0 || importPreview.preview.some((item) => item.classification === 'New' && !importClassifications[item.key])}>{busy ? 'Saving…' : 'Confirm and save'}</button>}</div>
       </section></div>}
@@ -278,6 +292,8 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
         {editing?.sensitivity === 'sensitive' && <label className="replace-sensitive-option"><input type="checkbox" checked={replaceSensitiveValue} onChange={(event) => setReplaceSensitiveValue(event.target.checked)} /> Replace the protected value</label>}
         <label htmlFor="variable-value">Value</label><textarea id="variable-value" name="value" rows={3} required={editor === 'new' || !editing || editing.sensitivity === 'standard' || replaceSensitiveValue} disabled={Boolean(editing?.sensitivity === 'sensitive' && !replaceSensitiveValue)} placeholder={editing?.sensitivity === 'sensitive' && !replaceSensitiveValue ? 'Protected value (unchanged)' : 'Enter the environment value'} defaultValue={editing?.sensitivity === 'standard' ? editing.value : ''} />
         <label htmlFor="variable-sensitivity">Classification</label><select id="variable-sensitivity" value={selectedSensitivity} onChange={(event) => setSelectedSensitivity(event.target.value as 'standard' | 'sensitive')}><option value="standard">Standard</option><option value="sensitive">Sensitive</option></select>
+        {selectedSensitivity === 'standard' && encryptionStatus?.standard_history_available === false && <p className="sensitivity-warning" role="status">{encryptionStatus.standard_history_reason === 'invalid_configuration' ? 'Standard variable history encryption is unavailable because the server key is invalid. Ask an administrator to correct the server configuration.' : 'Standard variable history encryption is not configured. This Standard value cannot be saved until it is configured.'}</p>}
+        {selectedSensitivity === 'sensitive' && encryptionStatus?.available === false && <p className="sensitivity-warning" role="status">{encryptionStatus.reason === 'invalid_configuration' ? 'Sensitive values cannot be saved because the server encryption key is invalid. Ask an administrator to correct the server configuration.' : 'Sensitive value encryption is not configured. Standard values can only be saved if Standard history encryption is configured.'}</p>}
         {editing?.sensitivity === 'sensitive' && selectedSensitivity === 'standard' && <p className="sensitivity-warning">Changing this to Standard makes the current value visible in normal responses.</p>}
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="modal-actions"><button className="workspace-secondary" type="button" onClick={() => setEditor(null)}>Cancel</button><button className="workspace-primary" type="submit" disabled={busy}>{busy ? <><LoaderCircle className="spin" size={15} /> Saving…</> : 'Save variable'}</button></div>

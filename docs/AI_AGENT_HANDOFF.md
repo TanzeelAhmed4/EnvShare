@@ -14,7 +14,7 @@ The current Windows checkout has a backend virtual environment at `backend\.venv
 
 - Cookie-backed session authentication, CSRF token retrieval, Argon2-preferred password hashing, registration/login throttling, and authentication audit events.
 - Project roles: Owner, Admin, Manager, and Member. The creator is the Owner. Only the Owner manages Admins; Admins may manage Managers and Members; Managers and Members cannot manage membership.
-- Development, Staging, and Production environments; Standard and Sensitive variables; AES-GCM encryption for current Sensitive values and all historical snapshots.
+- Development, Staging, and Production environments; Standard and Sensitive variables; AES-256-GCM encryption for current Sensitive values and all historical snapshots.
 - Variable history, compare, restore, and deletion snapshots; deleted-variable history is retained internally but is unavailable through regular API endpoints.
 - Single-use, email-bound invitations with hashed tokens, expiry, and transactional acceptance. Email delivery is not implemented.
 - Signed `.env` import preview/confirmation, audit history and server-side filters/pagination, project/environment-scoped write locking, and audit snapshot retention.
@@ -26,18 +26,19 @@ The current Windows checkout has a backend virtual environment at `backend\.venv
 - Do not put Sensitive plaintext in logs, audit rows, ordinary serializers, previews, or error messages. Successful Sensitive reveal is audited before plaintext is returned.
 - Standard current values are stored as plaintext. Standard and Sensitive historical snapshots are encrypted.
 - Historical AES-GCM context binds project, environment, variable, key, version, and classification. Current Sensitive value context binds environment and key.
-- Variable writes create encrypted history, so the process needs the stable `ENVSHARE_ENCRYPTION_KEY` before variable creation/import. Never replace it for an existing database; key rotation and recovery are not implemented.
+- Keep `DJANGO_SECRET_KEY`, `ENVSHARE_ENCRYPTION_KEY`, and `ENVSHARE_HISTORY_ENCRYPTION_KEY` distinct. Sensitive current values and v1 history use the Sensitive key; new Standard v3 history uses the dedicated history key. Legacy Standard v2 history uses HKDF-SHA256 with 32-byte output, salt `envshare:history-key-derivation:v2`, and info `standard-variable-version-snapshots`, deriving from the Django key. The reader tries the current Django-key derivation, then the dedicated history key. This checkout's ignored `backend/.env` has a history key derived with those legacy parameters to preserve local v2 compatibility. Never overwrite it or expose any key. Key rotation and history re-encryption are not implemented.
 - SQLite is local/test default; production requires PostgreSQL and Redis. PostgreSQL row-lock behavior and Redis multi-worker behavior are not verified until tested against real services.
 - Audit APIs are read-only but records are not tamper-proof against database operators or exported to an independent append-only store.
 - Read [Production deployment](PRODUCTION_DEPLOYMENT.md) and [Backup and recovery](BACKUP_RECOVERY.md) before changing deployment guidance. The recovery procedures are documentation, not tested recovery evidence.
 
 ## Verification record
 
-Latest recorded local verification:
+Latest verified local results (2026-11-12):
 
-- Backend: 139 tests discovered, 134 passed, 5 PostgreSQL-specific tests skipped because no PostgreSQL service was available. A separate deletion-history regression test passed after its route assertions were expanded.
-- Frontend tests, TypeScript validation, Django checks, migration consistency, and `git diff --check` passed.
-- Vite production bundling passed in production mode and with `--mode development`, using temporary output directories. A missing API URL under the overridden mode failed validation as intended. The combined `npm run build` attempt in the sandbox stopped at Vite/esbuild `spawn EPERM`; TypeScript and Vite bundling were verified separately.
+- Backend: 149 passed; 5 PostgreSQL-specific tests skipped because PostgreSQL was unavailable.
+- Frontend tests, TypeScript, Django system check, migration consistency, production frontend build, and `git diff --check` passed.
+- Read-only local compatibility verification decrypted 4 history snapshots and 1 current Sensitive record. Sensitive and Standard history encryption status both reported available. Only counts/status were reported; no values or keys were exposed and the database was not modified.
+- The user manually confirmed local Standard variable creation, Sensitive variable creation, and `.env` import working.
 - PostgreSQL concurrency and Redis shared-cache integrations remain pending. No deployment or recovery procedure has been certified.
 
 Refer to [Project status](PROJECT_STATUS.md) for current limits. Do not turn skipped tests into passing claims, and do not describe EnvShare as production-certified.

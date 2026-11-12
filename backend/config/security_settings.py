@@ -34,6 +34,17 @@ def _required(env, name):
     return value
 
 
+def _required_base64_key(env, name):
+    encoded_key = _required(env, name)
+    try:
+        decoded_key = base64.b64decode(encoded_key.encode('ascii'), altchars=b'-_', validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError):
+        raise ImproperlyConfigured(f'{name} must be Base64 text for a 32-byte key.') from None
+    if len(decoded_key) != 32:
+        raise ImproperlyConfigured(f'{name} must be Base64 text for a 32-byte key.')
+    return encoded_key
+
+
 def _boolean(env, name, default='false'):
     value = env.get(name, default).strip().lower()
     if value not in {'true', 'false', '1', '0'}:
@@ -66,13 +77,14 @@ def production_settings(env):
     if invalid_origin:
         raise ImproperlyConfigured('DJANGO_CORS_ALLOWED_ORIGINS must contain explicit HTTPS origins.')
 
-    encoded_key = _required(env, 'ENVSHARE_ENCRYPTION_KEY')
-    try:
-        encryption_key = base64.b64decode(encoded_key.encode('ascii'), altchars=b'-_', validate=True)
-    except (UnicodeEncodeError, binascii.Error, ValueError):
-        raise ImproperlyConfigured('ENVSHARE_ENCRYPTION_KEY must be Base64 text for a 32-byte key.') from None
-    if len(encryption_key) != 32:
-        raise ImproperlyConfigured('ENVSHARE_ENCRYPTION_KEY must be Base64 text for a 32-byte key.')
+    encoded_key = _required_base64_key(env, 'ENVSHARE_ENCRYPTION_KEY')
+    history_encoded_key = _required_base64_key(env, 'ENVSHARE_HISTORY_ENCRYPTION_KEY')
+    sensitive_key_bytes = base64.b64decode(encoded_key.encode('ascii'), altchars=b'-_', validate=True)
+    history_key_bytes = base64.b64decode(history_encoded_key.encode('ascii'), altchars=b'-_', validate=True)
+    if history_key_bytes == sensitive_key_bytes or history_key_bytes == secret_key.encode('utf-8'):
+        raise ImproperlyConfigured(
+            'ENVSHARE_HISTORY_ENCRYPTION_KEY must be separate from Django and Sensitive-value keys.'
+        )
 
     try:
         hsts_seconds = int(env.get('DJANGO_SECURE_HSTS_SECONDS', '86400'))
@@ -138,6 +150,7 @@ def production_settings(env):
         'ALLOWED_HOSTS': allowed_hosts,
         'CORS_ALLOWED_ORIGINS': cors_origins,
         'ENVSHARE_ENCRYPTION_KEY': encoded_key,
+        'ENVSHARE_HISTORY_ENCRYPTION_KEY': history_encoded_key,
         'SECURE_HSTS_SECONDS': hsts_seconds,
         'SECURE_HSTS_INCLUDE_SUBDOMAINS': include_subdomains,
         'SECURE_HSTS_PRELOAD': preload,

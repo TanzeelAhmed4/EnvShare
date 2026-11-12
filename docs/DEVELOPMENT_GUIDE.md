@@ -1,6 +1,6 @@
 # Local development guide (Windows PowerShell)
 
-This guide starts EnvShare with the local SQLite database, Django development server, and Vite. Django settings read process environment variables; Django does not load `.env` files. Vite can load its own `.env` files, but `.env.example` and `.env.production.example` are templates and are not loaded automatically.
+This guide starts EnvShare with the local SQLite database, Django development server, and Vite. Django settings load `backend/.env` for variables not already set in the process environment; process environment values take precedence. Vite can load its own recognized `.env` files, but `.env.example` and `.env.production.example` are templates and are not loaded automatically.
 
 ## Prerequisites
 
@@ -31,20 +31,31 @@ If `py -3.14` is unavailable, install a Python version supported by Django 6.1 a
 
 Local defaults are `DJANGO_ENV=development`, SQLite at `backend\db.sqlite3`, API port 8000, and CORS/CSRF origin `http://localhost:5173`. The development Django secret fallback is only for local development.
 
-Variable create, update, delete, import, and restore operations write encrypted history snapshots for both Standard and Sensitive classifications. Therefore configure `ENVSHARE_ENCRYPTION_KEY` before variable writes. It must be Base64 text for a 32-byte key. Generate a key once for a new local database, store it outside the repository in a protected local secret store, and set that same value whenever the database is used. Do not replace it for a database that already contains history.
+Variable create, update, delete, import, and restore operations write encrypted history snapshots for both Standard and Sensitive classifications. Configure both `ENVSHARE_ENCRYPTION_KEY` and `ENVSHARE_HISTORY_ENCRYPTION_KEY` before variable writes. Each must be a distinct Base64-encoded 32-byte key; neither is `DJANGO_SECRET_KEY`. `DJANGO_SECRET_KEY` is Django's signing key and also the legacy v2 history compatibility input. The Sensitive key protects current Sensitive values, Sensitive history, and legacy v1 snapshots. The history key protects new Standard v3 history snapshots. Back up the exact keys separately from the database and never replace keys for a database that already contains ciphertext.
+
+This checkout already has a local `ENVSHARE_HISTORY_ENCRYPTION_KEY` in the ignored `backend/.env`. It was provisioned from the currently configured original Django key using the legacy v2 HKDF-SHA256 parameters: 32-byte output, salt `envshare:history-key-derivation:v2`, and info `standard-variable-version-snapshots`. That preserves existing v2 records through the dedicated-key compatibility fallback. Do not overwrite it or treat the one-time provisioning procedure as a general key generator. Verify any restored database/key pair without printing plaintext or keys.
+
+For a new local database only, generate each key once with Python and immediately put the output into the protected secret store (not shell history, a committed file, or logs):
+
+```powershell
+python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('ascii'))"
+```
+
+Run it separately for each key only when provisioning a new database. Do not use this command to replace an existing key. For legacy Standard `v2` snapshots, the reader tries the currently configured Django-key derivation first and the dedicated history key after authentication failure. To preserve access across a future `DJANGO_SECRET_KEY` change, retain the original Django key or provision the dedicated history key with its corresponding legacy HKDF-derived material, then verify decryption before changing the Django key. New `v3` Standard snapshots do not depend on Django's key. No history re-encryption or key-rotation command is provided.
 
 In the PowerShell terminal that will run Django, supply the saved key and optional local overrides:
 
 ```powershell
 $env:DJANGO_ENV = 'development'
 $env:ENVSHARE_ENCRYPTION_KEY = '<your saved Base64-encoded 32-byte development key>'
+$env:ENVSHARE_HISTORY_ENCRYPTION_KEY = '<your separate saved Base64-encoded 32-byte history key>'
 # Optional overrides:
 # $env:DJANGO_SECRET_KEY = '<local-only Django secret>'
 # $env:DJANGO_ALLOWED_HOSTS = 'localhost,127.0.0.1'
 # $env:DJANGO_CORS_ALLOWED_ORIGINS = 'http://localhost:5173'
 ```
 
-The placeholder above is not a usable key. Do not put a real key in this guide, a committed `.env` file, shell transcript, or shared log. If you only need to run the frontend or inspect non-variable pages, the encryption key is not needed; variable writes and history require it.
+The placeholders above are not usable keys. Do not put real keys in this guide, a committed `.env` file, shell transcript, or shared log. Local `backend/.env` is read for variables not already set in the process environment; process-level values take precedence. If you only need to run the frontend or inspect non-variable pages, the encryption keys are not needed; Standard variable writes/history require the history key and Sensitive writes also require the Sensitive key.
 
 ## Apply migrations and start the backend
 
@@ -111,7 +122,7 @@ SQLite is the default outside production. Production requires `ENVSHARE_DB_ENGIN
 
 Optional database settings are `ENVSHARE_DB_PORT` (default `5432`), `ENVSHARE_DB_CONNECT_TIMEOUT` (default `5` seconds), `ENVSHARE_DB_SSLMODE` (development default `prefer`, production default `require`), and `ENVSHARE_DB_SSLROOTCERT`. Production deployments should configure certificate validation such as `verify-full` when supported by the database provider. Set values in the process environment or protected secret store, not in source control.
 
-Production also requires `DJANGO_ENV=production`, `DJANGO_DEBUG=false`, `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CORS_ALLOWED_ORIGINS`, `ENVSHARE_ENCRYPTION_KEY`, and `ENVSHARE_CACHE_URL`. See the [production configuration example](../backend/.env.production.example) and [deployment guide](PRODUCTION_DEPLOYMENT.md); never copy its placeholders into a running service.
+Production also requires `DJANGO_ENV=production`, `DJANGO_DEBUG=false`, `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CORS_ALLOWED_ORIGINS`, both encryption keys, and `ENVSHARE_CACHE_URL`. See the [production configuration example](../backend/.env.production.example) and [deployment guide](PRODUCTION_DEPLOYMENT.md); never copy its placeholders into a running service.
 
 ## Troubleshooting
 

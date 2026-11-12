@@ -16,7 +16,10 @@ TEST_KEY = base64.urlsafe_b64encode(b'Q' * 32).decode('ascii')
 
 
 @skipUnless(connection.vendor == 'sqlite', 'SQLite-specific write-lock fallback test')
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'Z' * 32).decode('ascii'),
+)
 class SQLiteConcurrentVariableUpdateTests(TransactionTestCase):
     reset_sequences = True
 

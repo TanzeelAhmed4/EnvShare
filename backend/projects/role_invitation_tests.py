@@ -21,7 +21,10 @@ User = get_user_model()
 TEST_KEY = base64.urlsafe_b64encode(b'R' * 32).decode('ascii')
 
 
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'S' * 32).decode('ascii'),
+)
 class ProjectRoleAndInvitationTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='role-owner', email='owner@example.test', password='Strong-Password-882!')

@@ -4,15 +4,16 @@ This guide documents the production settings and application boundaries present 
 
 ## Configuration and secret provisioning
 
-Django reads process environment variables; it does not load `.env` files. `backend/.env.production.example` is a placeholder template only. Do not load it as a real configuration file or copy its placeholder values into a service. Supply the values below through a protected deployment secret/configuration mechanism and restrict access to them.
+Django loads `backend/.env` only for variables not already supplied by the process environment; process values take precedence. `backend/.env.production.example` is a placeholder template only. Do not copy its placeholder values into a service. Prefer a protected deployment secret/configuration mechanism and restrict access to it.
 
 Required application settings:
 
 - `DJANGO_ENV=production` and `DJANGO_DEBUG=false`.
-- `DJANGO_SECRET_KEY`: a private value of at least 50 characters. Production validation rejects known development keys and obvious placeholders. Never reuse a sample value.
+- `DJANGO_SECRET_KEY`: Django signing key, a private value of at least 50 characters. Production validation rejects known development keys and obvious placeholders. It is separate from both encryption keys. Legacy Standard v2 history has a compatibility path using the original Django key; preserve it or provision the history key with the matching legacy HKDF-derived material and verify decryption before changing it.
 - `DJANGO_ALLOWED_HOSTS`: explicit host names; wildcard hosts are rejected.
 - `DJANGO_CORS_ALLOWED_ORIGINS`: comma-separated exact HTTPS origins without paths, credentials, query strings, or fragments. The same list configures Django's trusted CSRF origins.
-- `ENVSHARE_ENCRYPTION_KEY`: the existing Base64-encoded 32-byte AES key. Keep it stable for all current and historical encrypted values. It is not stored in the database. Do not replace it as a deployment step.
+- `ENVSHARE_ENCRYPTION_KEY`: the existing Base64-encoded 32-byte AES key for current Sensitive values and Sensitive/legacy history. Keep it stable and do not replace it as a deployment step.
+- `ENVSHARE_HISTORY_ENCRYPTION_KEY`: a separate Base64-encoded 32-byte AES key for new Standard history snapshots. Keep it stable and back it up independently from the database and from `ENVSHARE_ENCRYPTION_KEY`.
 - `ENVSHARE_CACHE_URL`: a `redis://` or `rediss://` URL. Production uses Redis as Django's default cache for API throttles, admin throttling, and readiness checks.
 
 Required production database settings:
@@ -79,7 +80,7 @@ Django's middleware sets a restrictive CSP on Django responses. If the React app
 
 ## Backup and recovery
 
-EnvShare does not create automatic backups. Back up the PostgreSQL database and the matching `ENVSHARE_ENCRYPTION_KEY` separately, with restricted access and a recovery plan. Database-only recovery cannot decrypt Sensitive current values or historical snapshots without the corresponding key. Replacing the key is not key rotation and makes existing ciphertext unreadable. See [Backup and recovery](BACKUP_RECOVERY.md); the documented procedures have not been exercised against production infrastructure.
+EnvShare does not create automatic backups. Back up the PostgreSQL database and matching `ENVSHARE_ENCRYPTION_KEY`, `ENVSHARE_HISTORY_ENCRYPTION_KEY`, and `DJANGO_SECRET_KEY` separately, with restricted access and a recovery plan. The Django key remains needed for legacy Standard v2 history unless the dedicated history key has been provisioned with its matching legacy-derived material and decryption verified. Database-only recovery cannot decrypt encrypted values. Replacing a key is not rotation and makes ciphertext unreadable. See [Backup and recovery](BACKUP_RECOVERY.md); the documented procedures have not been exercised against production infrastructure.
 
 ## Deployment verification checklist
 

@@ -17,7 +17,10 @@ TEST_KEY = base64.urlsafe_b64encode(b'A' * 32).decode('ascii')
 User = get_user_model()
 
 
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'B' * 32).decode('ascii'),
+)
 class EnvironmentVariableAuditTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='audit-owner', password='Strong-Password-882!')

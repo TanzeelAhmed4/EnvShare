@@ -68,6 +68,12 @@ export type ImportPreview = {
   invalid_lines: { line: number; message: string }[];
   preview_token: string;
 };
+export type EncryptionStatus = {
+  available: boolean;
+  reason: 'not_configured' | 'invalid_configuration' | null;
+  standard_history_available: boolean;
+  standard_history_reason: 'not_configured' | 'invalid_configuration' | null;
+};
 
 export type AuditChange = { before: string | number | boolean | null; after: string | number | boolean | null };
 export type AuditEvent = {
@@ -101,6 +107,7 @@ export type AuditPage<T> = { count: number; next: string | null; previous: strin
 
 
 export const projectsApi = {
+  encryptionStatus: () => apiRequest<EncryptionStatus>('/projects/encryption-status/'),
   list: () => apiRequest<Project[]>('/projects/'),
   get: (id: number) => apiRequest<Project>(`/projects/${id}/`),
   create: (data: Pick<Project, 'name' | 'description'>) => apiRequest<Project>('/projects/', {

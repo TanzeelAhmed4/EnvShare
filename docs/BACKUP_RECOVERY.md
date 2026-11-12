@@ -4,9 +4,11 @@ EnvShare does not create automatic backups or upload database contents. The exam
 
 ## What must be protected
 
-Back up the database and the exact matching `ENVSHARE_ENCRYPTION_KEY` as separate protected assets. Restrict access to each, encrypt backups at rest and in transit, define retention, and keep the key in an approved secret-management system rather than with the database dump. An authorized operator with both the database backup and key can decrypt stored Sensitive values.
+Back up the database and the exact matching `ENVSHARE_ENCRYPTION_KEY`, `ENVSHARE_HISTORY_ENCRYPTION_KEY`, and `DJANGO_SECRET_KEY` as separate protected assets. Restrict access to each, encrypt backups at rest and in transit, define retention, and keep keys in an approved secret-management system rather than with the database dump. `ENVSHARE_ENCRYPTION_KEY` is required for current Sensitive values, Sensitive history, and older Standard v1 history; `ENVSHARE_HISTORY_ENCRYPTION_KEY` is required for new Standard v3 history. Legacy Standard v2 snapshots were derived from the original Django key. Retain that Django key, or provision the dedicated history key with the matching legacy-derived material and verify it before changing the Django key. An authorized operator with the database backup and the matching key material can recover corresponding records.
 
-The key is external process configuration. Current Sensitive values and all historical version snapshots are encrypted with it. A database backup without its matching key cannot recover those values. Losing or replacing the key makes the affected ciphertext unreadable; setting a new key does not rotate or recover old data. EnvShare does not implement key rotation or key recovery.
+All three settings are external process configuration and must be backed up independently from the database. A database backup without its matching keys cannot recover the affected ciphertext. Losing or replacing a key makes ciphertext written with that key unreadable; setting a new key does not rotate or recover old data. EnvShare does not implement key rotation or history re-encryption.
+
+Generate the two keys once for a new database using a cryptographically secure 32-byte random value encoded as URL-safe Base64. Store them in separate named entries in the approved secret manager, verify recovery access, and never paste them into repository files, tickets, shell transcripts, logs, or database backups. Do not generate replacement keys for an existing database.
 
 ## SQLite local development backup
 
@@ -56,9 +58,9 @@ Do not add destructive cleanup flags or test this against production. Review mig
 
 ## Encryption-key backup and recovery
 
-Store the exact existing `ENVSHARE_ENCRYPTION_KEY` in an approved secret manager with access controls and recovery permissions separate from database backup access. Do not put the value in this document, source control, a database dump, a ticket, shell history, or logs. Record a non-secret identifier/version in the recovery record so operators can select the matching key without exposing its value.
+Store the exact existing `ENVSHARE_ENCRYPTION_KEY` and `ENVSHARE_HISTORY_ENCRYPTION_KEY` in an approved secret manager with access controls and recovery permissions separate from database backup access. Do not put key values in this document, source control, a database dump, a ticket, shell history, or logs. Record non-secret identifiers/versions in the recovery record so operators can select the matching keys without exposing their values.
 
-During recovery, restore the database and retrieve the matching key through the approved secret-management process. Supply it to the backend process environment without printing it. Start an isolated instance with the matching production configuration, verify migrations and representative project data, and perform a controlled Sensitive-value decryption check without copying plaintext into logs or reports. Do not replace the key if decryption fails; stop and investigate whether the wrong key version or backup pair was selected.
+During recovery, restore the database and retrieve all matching key settings through the approved secret-management process. Supply them to the backend process environment without printing them. Preserve the original `DJANGO_SECRET_KEY` when the database contains legacy Standard `v2` history unless the dedicated history key has already been provisioned with that history's derived material and verified. New `v3` Standard history is independent of Django's key. Start an isolated instance with matching configuration and perform controlled recovery checks without copying plaintext into logs or reports. Do not replace keys if decryption fails; stop and investigate the selected backup/key pair.
 
 ## Recovery exercises and operational ownership
 

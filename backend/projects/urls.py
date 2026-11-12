@@ -2,6 +2,7 @@ from django.urls import path
 
 from .environment_views import (
     EnvironmentVariableDetailView,
+    EncryptionConfigurationStatusView,
     EnvironmentImportConfirmView,
     EnvironmentImportPreviewView,
     EnvironmentVariableListCreateView,
@@ -25,6 +26,7 @@ from .version_views import (
 
 
 urlpatterns = [
+    path('encryption-status/', EncryptionConfigurationStatusView.as_view(), name='encryption-status'),
     path('', ProjectListCreateView.as_view(), name='project-list-create'),
     path('<int:project_id>/', ProjectDetailView.as_view(), name='project-detail'),
     path('<int:project_id>/delete/', ProjectDeleteView.as_view(), name='project-delete'),

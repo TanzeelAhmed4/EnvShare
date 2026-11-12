@@ -41,7 +41,10 @@ class EnvImportParserTests(TestCase):
         self.assertEqual(errors, [{'line': 2, 'message': 'Duplicate key in imported text.'}])
 
 
-@override_settings(ENVSHARE_ENCRYPTION_KEY=TEST_KEY)
+@override_settings(
+    ENVSHARE_ENCRYPTION_KEY=TEST_KEY,
+    ENVSHARE_HISTORY_ENCRYPTION_KEY=base64.urlsafe_b64encode(b'J' * 32).decode('ascii'),
+)
 class EnvImportApiTests(TestCase):
     def setUp(self):
         self.owner = User.objects.create_user(username='import-owner', password='Strong-Password-882!')
@@ -57,6 +60,41 @@ class EnvImportApiTests(TestCase):
 
     def payload(self, content, **extra):
         return {'content': content, **extra}
+
+    def test_standard_import_succeeds_without_encryption_key(self):
+        self.client.force_authenticate(user=self.owner)
+        content = 'PUBLIC_IMPORT=visible'
+        with self.settings(ENVSHARE_ENCRYPTION_KEY=''):
+            preview = self.client.post(
+                self.url('preview'), self.payload(content, classifications={'PUBLIC_IMPORT': 'standard'}), format='json',
+            )
+            confirmed = self.client.post(
+                self.url('confirm'),
+                self.payload(content, classifications={'PUBLIC_IMPORT': 'standard'}, confirm=True,
+                             preview_token=preview.json()['preview_token']),
+                format='json',
+            )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertEqual(EnvironmentVariable.objects.get(key='PUBLIC_IMPORT').value, 'visible')
+
+    def test_sensitive_import_without_key_fails_safely(self):
+        self.client.force_authenticate(user=self.owner)
+        with self.settings(ENVSHARE_ENCRYPTION_KEY=''):
+            preview = self.client.post(
+                self.url('preview'), self.payload('PRIVATE_IMPORT=secret', classifications={'PRIVATE_IMPORT': 'sensitive'}), format='json',
+            )
+            # Preview is allowed; confirmation must fail at the encryption boundary.
+            confirmed = self.client.post(
+                self.url('confirm'),
+                self.payload('PRIVATE_IMPORT=secret', classifications={'PRIVATE_IMPORT': 'sensitive'},
+                             confirm=True, preview_token=preview.json()['preview_token']),
+                format='json',
+            )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(confirmed.status_code, 503)
+        self.assertNotIn('secret', confirmed.content.decode())
+        self.assertFalse(EnvironmentVariable.objects.filter(key='PRIVATE_IMPORT').exists())
 
     def test_preview_returns_exact_classifications_and_does_not_save(self):
         EnvironmentVariable.objects.create(

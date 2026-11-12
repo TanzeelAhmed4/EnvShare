@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+import re
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -19,6 +20,21 @@ from .security_settings import DEVELOPMENT_SECRET_KEY, production_settings
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load local backend configuration without overriding values supplied by the
+# process manager. Secrets stay in the environment and are never logged.
+_local_env = BASE_DIR / '.env'
+if _local_env.is_file():
+    for _line in _local_env.read_text(encoding='utf-8').splitlines():
+        _match = re.match(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$', _line)
+        if not _match or _match.group(1) in os.environ:
+            continue
+        _value = _match.group(2)
+        if len(_value) >= 2 and _value[0] == _value[-1] and _value[0] in {'"', "'"}:
+            _value = _value[1:-1]
+        else:
+            _value = re.split(r'\s+#', _value, maxsplit=1)[0].rstrip()
+        os.environ[_match.group(1)] = _value
 
 
 # Quick-start development settings - unsuitable for production
@@ -222,6 +238,10 @@ CSRF_FAILURE_VIEW = 'accounts.auth_views.csrf_failure'
 ENVSHARE_ENCRYPTION_KEY = (
     _production['ENVSHARE_ENCRYPTION_KEY'] if ENVSHARE_ENV == 'production'
     else os.environ.get('ENVSHARE_ENCRYPTION_KEY', '')
+)
+ENVSHARE_HISTORY_ENCRYPTION_KEY = (
+    _production['ENVSHARE_HISTORY_ENCRYPTION_KEY'] if ENVSHARE_ENV == 'production'
+    else os.environ.get('ENVSHARE_HISTORY_ENCRYPTION_KEY', '')
 )
 
 SESSION_COOKIE_AGE = (

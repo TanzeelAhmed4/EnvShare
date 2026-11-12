@@ -103,6 +103,7 @@ class ProductionSettingsTests(SimpleTestCase):
             'DJANGO_ALLOWED_HOSTS': 'envshare.example.test,api.example.test',
             'DJANGO_CORS_ALLOWED_ORIGINS': 'https://envshare.example.test',
             'ENVSHARE_ENCRYPTION_KEY': base64.urlsafe_b64encode(b'P' * 32).decode('ascii'),
+            'ENVSHARE_HISTORY_ENCRYPTION_KEY': base64.urlsafe_b64encode(b'H' * 32).decode('ascii'),
             'ENVSHARE_CACHE_URL': 'rediss://cache.example.test:6379/0',
         }
 
@@ -116,6 +117,7 @@ class ProductionSettingsTests(SimpleTestCase):
         self.assertEqual(configured['SESSION_COOKIE_AGE'], 3600)
         self.assertEqual(configured['SECURE_HSTS_SECONDS'], 86400)
         self.assertEqual(configured['CACHE_URL'], 'rediss://cache.example.test:6379/0')
+        self.assertEqual(configured['ENVSHARE_HISTORY_ENCRYPTION_KEY'], self.valid_environment()['ENVSHARE_HISTORY_ENCRYPTION_KEY'])
         self.assertFalse(configured['TRUST_PROXY_SSL_HEADER'])
 
     def test_production_requires_shared_redis_cache(self):
@@ -164,6 +166,7 @@ class ProductionSettingsTests(SimpleTestCase):
             'DJANGO_ALLOWED_HOSTS': 'api.example.test',
             'DJANGO_CORS_ALLOWED_ORIGINS': 'https://app.example.test',
             'ENVSHARE_ENCRYPTION_KEY': base64.urlsafe_b64encode(b'R' * 32).decode('ascii'),
+            'ENVSHARE_HISTORY_ENCRYPTION_KEY': base64.urlsafe_b64encode(b'G' * 32).decode('ascii'),
             'ENVSHARE_CACHE_URL': 'rediss://cache.example.test:6379/0',
             'ENVSHARE_DB_ENGINE': 'postgresql',
             'ENVSHARE_DB_NAME': 'test_database',
@@ -254,6 +257,7 @@ class ProductionSettingsTests(SimpleTestCase):
 
         for field in (
             'SECRET_KEY', 'DJANGO_SECRET_KEY', 'secret-key', 'ENVSHARE_ENCRYPTION_KEY',
+            'ENVSHARE_HISTORY_ENCRYPTION_KEY',
             'access_token', 'PASSWORD',
         ):
             marker = 'safe-test-marker-value'
@@ -291,6 +295,20 @@ class ProductionSettingsTests(SimpleTestCase):
             environment = self.valid_environment()
             environment['ENVSHARE_ENCRYPTION_KEY'] = value
             with self.subTest(key_configured=bool(value)):
+                with self.assertRaises(ImproperlyConfigured) as raised:
+                    production_settings(environment)
+                if value:
+                    self.assertNotIn(value, str(raised.exception))
+
+        environment = self.valid_environment()
+        environment['ENVSHARE_HISTORY_ENCRYPTION_KEY'] = environment['ENVSHARE_ENCRYPTION_KEY']
+        with self.assertRaises(ImproperlyConfigured):
+            production_settings(environment)
+
+        for value in ('', 'not-valid-history-base64', 'c2hvcnQ='):
+            environment = self.valid_environment()
+            environment['ENVSHARE_HISTORY_ENCRYPTION_KEY'] = value
+            with self.subTest(history_key_configured=bool(value)):
                 with self.assertRaises(ImproperlyConfigured) as raised:
                     production_settings(environment)
                 if value:

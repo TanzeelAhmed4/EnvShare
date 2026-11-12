@@ -29,6 +29,21 @@ The repository contains the application code and production configuration. It do
 - `backend/projects/` contains project membership, environments, variables, invitations, imports, encryption helpers, version history, audit events, and project-scoped API views.
 - `backend/config/` wires Django settings, URLs, middleware, database/cache selection, health endpoints, error handling, and production startup checks.
 
+## Data model and relationships
+
+| Model | Relationship and purpose |
+|---|---|
+| `accounts.User` | Custom Django user; referenced by projects, memberships, invitations, variable/version events, and authentication audit events. |
+| `Project` | Has a creator (the Owner), many `ProjectMembership` rows, invitations, environments, and audit/version records. |
+| `ProjectMembership` | Joins a user to a project with Admin, Manager, or Member role; one row per project/user. The Owner is represented by `Project.creator`, not a membership row. |
+| `ProjectInvitation` | Belongs to a project; stores normalized invite address, permitted role, token hash, expiry/use limits, and revocation state. |
+| `Environment` | Belongs to a project; Development, Staging, or Production name is unique within that project. |
+| `EnvironmentVariable` | Belongs to an environment; key is unique within the environment and value is Standard or Sensitive. |
+| `EnvironmentVariableVersion` | Encrypted snapshot associated with project/environment/variable when those rows exist, plus ID/key/classification snapshots that retain context after deletion. |
+| Audit events | `AuthenticationAuditEvent` tracks account events; `ProjectAccessAuditEvent` tracks project membership/invitations; `EnvironmentVariableAuditEvent` tracks variable operations. Nullable relations and snapshots preserve useful context when related rows are deleted. |
+
+Project deletion cascades to its memberships, invitations, and environments. Variable and audit/version records use nullable links and retained snapshot fields where history is intended to outlive a live variable. Database migrations define the exact constraints and deletion rules.
+
 ## Authentication, sessions, and CSRF
 
 Registration, login, logout, and current-user endpoints use Django sessions. Passwords are hashed with Django's configured Argon2-first hasher list. Unsafe requests use Django CSRF protection; the frontend fetches a CSRF token through `/api/auth/csrf/` and sends it in the CSRF header with session credentials.
@@ -50,11 +65,13 @@ Projects create Development, Staging, and Production environment rows. Variable 
 
 ## Variables and encryption
 
-`EnvironmentVariable` stores a key, value, and Standard/Sensitive classification. Standard current values are plaintext in the database. Sensitive current values are encrypted using AES-256-GCM with a fresh 12-byte nonce and authenticated context containing the environment ID and key. The encryption key is supplied through `ENVSHARE_ENCRYPTION_KEY`, Base64-encoded to 32 bytes; it is not stored in the database.
+`EnvironmentVariable` stores a key, value, and Standard/Sensitive classification. Standard current values are plaintext in the database. Sensitive current values are encrypted using AES-256-GCM with a fresh 12-byte nonce and authenticated context containing the environment ID and key. Their key is supplied through `ENVSHARE_ENCRYPTION_KEY`, Base64-encoded to 32 bytes; it is not stored in the database.
 
 Ordinary responses mask Sensitive values. Owner, Admin, and Manager roles have the reveal permission. A successful reveal writes a context-only audit event before returning plaintext; if the audit write fails, the API withholds the value.
 
-Every variable version snapshot, including Standard values, is encrypted. Historical authenticated context binds project, environment, variable, key, version number, and classification. Updates append versions; restoration adds a new version rather than overwriting prior history. Deletion appends an encrypted deleted snapshot before removing the live row. Snapshot metadata and ciphertext are retained internally, but deleted-variable history is not accessible through normal API endpoints. Losing or replacing the key makes encrypted current and historical values unreadable; rotation is not implemented.
+Every variable version snapshot, including Standard values, is encrypted with AES-256-GCM and authenticated context binding project, environment, variable, key, version number, and classification. The three configurations are distinct: `DJANGO_SECRET_KEY` is Django's signing key; `ENVSHARE_ENCRYPTION_KEY` protects current Sensitive values and Sensitive/legacy v1 history; `ENVSHARE_HISTORY_ENCRYPTION_KEY` protects new Standard v3 history. The encryption settings are Base64-encoded 32-byte keys and must remain distinct.
+
+Standard snapshots in the interim `v2` format use an HKDF-SHA256-derived AES key from the Django key, with 32-byte output, salt `envshare:history-key-derivation:v2`, and info `standard-variable-version-snapshots`. The reader first tries derivation from the currently configured Django key. If authentication fails, it tries `ENVSHARE_HISTORY_ENCRYPTION_KEY`, which can be provisioned with the legacy-derived material to preserve history across a later Django key change. Earlier v1 snapshots continue to use `ENVSHARE_ENCRYPTION_KEY`. The local history key was provisioned this way and is stored in ignored `backend/.env`; no secret value is documented here. Updates append versions; restoration adds a new version rather than overwriting prior history. Deletion appends an encrypted deleted snapshot before removing the live row. Snapshot metadata and ciphertext are retained internally, but deleted-variable history is not accessible through normal API endpoints. Back up all matching keys with the database. Key rotation and history re-encryption are not implemented; changing the Django key before v2 compatibility is secured can make old snapshots unreadable.
 
 ## Invitations
 
@@ -68,7 +85,7 @@ The `.env` importer parses key/value lines and provides New, Update, and Unchang
 
 ## Database and concurrency
 
-SQLite is the default for local development and tests. `ENVSHARE_DB_ENGINE=postgresql` selects PostgreSQL using environment-supplied connection settings. Production settings reject SQLite, require PostgreSQL and Redis, and require encrypted PostgreSQL transport; `verify-full` is preferable where the provider's CA configuration allows it. The project includes environment/project-scoped write locking and PostgreSQL concurrency tests. Five PostgreSQL-specific tests were skipped in the latest recorded local run because PostgreSQL was unavailable; SQLite test success does not verify PostgreSQL row-lock behavior.
+SQLite is the default for local development and tests. `ENVSHARE_DB_ENGINE=postgresql` selects PostgreSQL using environment-supplied connection settings. Production settings reject SQLite, require PostgreSQL and Redis, and require encrypted PostgreSQL transport; `verify-full` is preferable where the provider's CA configuration allows it. Mutating workflows use `transaction.atomic()` and acquire a scope lock with a no-op `UPDATE` against the Environment or Project row before reading/modifying dependent records. PostgreSQL serializes competing writers through row locks; SQLite acquires its write lock early through the update. Constraint and operational errors are handled as safe conflicts where applicable. The project includes PostgreSQL concurrency tests. Five PostgreSQL-specific tests were skipped in the latest recorded local run because PostgreSQL was unavailable; SQLite test success does not verify PostgreSQL row-lock behavior.
 
 The local cache is process-local memory. Production uses the configured Redis URL as Django's default cache for throttling and health checks. Redis multi-process behavior remains deployment-dependent and has not been integration-tested.
 
