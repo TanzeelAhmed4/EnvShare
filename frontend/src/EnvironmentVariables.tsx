@@ -1,17 +1,19 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Eye, EyeOff, GitCompare, History, KeyRound, LoaderCircle, LockKeyhole, Pencil, Plus, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react';
+import { Download, Eye, EyeOff, GitCompare, History, KeyRound, LoaderCircle, LockKeyhole, Pencil, Plus, RotateCcw, Search, ShieldCheck, Trash2 } from 'lucide-react';
 import { EncryptionStatus, Environment, ImportPreview, ProjectVariable, VariableVersion, VariableVersionComparison, projectsApi } from './projectsApi';
+import { useModalAccessibility } from './useModalAccessibility';
 
 type Props = {
   projectId: number;
   canManageHistory: boolean;
+  canWriteVariables: boolean;
   onAuditChange: () => void;
   environments: Environment[];
   selectedEnvironmentId: number | null;
   onSelectEnvironment: (id: number) => void;
 };
 
-export default function EnvironmentVariables({ projectId, canManageHistory, onAuditChange, environments, selectedEnvironmentId, onSelectEnvironment }: Props) {
+export default function EnvironmentVariables({ projectId, canManageHistory, canWriteVariables, onAuditChange, environments, selectedEnvironmentId, onSelectEnvironment }: Props) {
   const [variables, setVariables] = useState<ProjectVariable[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -34,6 +36,10 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [encryptionStatus, setEncryptionStatus] = useState<EncryptionStatus | null>(null);
+  const [search, setSearch] = useState('');
+  const historyDialogRef = useModalAccessibility<HTMLElement>(Boolean(historyVariable), () => setHistoryVariable(null));
+  const importDialogRef = useModalAccessibility<HTMLElement>(importOpen, () => setImportOpen(false));
+  const editorDialogRef = useModalAccessibility<HTMLElement>(editor !== null, () => setEditor(null));
 
   async function refreshEncryptionStatus() {
     try { setEncryptionStatus(await projectsApi.encryptionStatus()); }
@@ -193,6 +199,27 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
     setImportOpen(true);
   }
 
+  function exportVariables() {
+    const standard = variables.filter((variable) => variable.sensitivity === 'standard' && !/[\r\n]/.test(variable.value));
+    const multiline = variables.filter((variable) => variable.sensitivity === 'standard' && /[\r\n]/.test(variable.value));
+    const sensitive = variables.filter((variable) => variable.sensitivity === 'sensitive');
+    const lines = [
+      '# EnvShare environment export',
+      `# Environment: ${activeEnvironment?.label ?? 'Unknown'}`,
+      ...(sensitive.length ? [`# Sensitive values omitted for security: ${sensitive.map((variable) => variable.key).join(', ')}`] : []),
+      ...(multiline.length ? [`# Multiline values omitted because the import format accepts single-line values: ${multiline.map((variable) => variable.key).join(', ')}`] : []),
+      ...standard.map((variable) => `${variable.key}=${variable.value}`),
+    ];
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${activeEnvironment?.name ?? 'environment'}.env`;
+    link.click();
+    URL.revokeObjectURL(url);
+    const omitted = sensitive.length + multiline.length;
+    setImportNotice(omitted ? `Exported ${standard.length} standard variables. ${sensitive.length} sensitive and ${multiline.length} multiline values were omitted.` : `Exported ${standard.length} variables.`);
+  }
+
   async function previewImport(classifications = importClassifications) {
     if (!selectedEnvironmentId) return;
     setBusy(true);
@@ -228,6 +255,9 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
 
   const activeEnvironment = environments.find((environment) => environment.id === selectedEnvironmentId);
   const editing = editor !== null && editor !== 'new' ? editor : null;
+  const visibleVariables = variables.filter((variable) => variable.key.toLowerCase().includes(search.toLowerCase()));
+
+  if (selectedEnvironmentId === null) return <section className="variables-empty"><h3>Select an environment first</h3><p>Choose Development, Staging, or Production before managing variables.</p></section>;
 
   return (
     <section className="variable-manager" aria-labelledby="variables-title">
@@ -241,21 +271,22 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
           onClick={() => onSelectEnvironment(environment.id)}
         ><span className="environment-tab-dot" />{environment.label}</button>)}
       </div>
-      <div className="variable-toolbar"><div><strong>{activeEnvironment?.label ?? 'Environment'}</strong><span>Changes are saved to this environment only.</span></div><div className="variable-toolbar-actions"><button className="workspace-secondary" onClick={openImport} disabled={!selectedEnvironmentId}>Import .env</button><button className="workspace-primary" onClick={startCreate} disabled={!selectedEnvironmentId}><Plus size={16} /> Add variable</button></div></div>
+      <div className="variable-toolbar"><div><strong>{activeEnvironment?.label ?? 'Environment'}</strong><span>Changes are saved to this environment only.</span></div><div className="variable-toolbar-actions">{canWriteVariables && <button className="workspace-secondary" onClick={openImport} disabled={!selectedEnvironmentId}>Import .env</button>}<button className="workspace-secondary" onClick={exportVariables} disabled={!selectedEnvironmentId || loading}><Download size={15} /> Export .env</button>{canWriteVariables && <button className="workspace-primary" onClick={startCreate} disabled={!selectedEnvironmentId}><Plus size={16} /> Add variable</button>}</div></div>
       {error && <p className="workspace-alert variable-alert" role="alert">{error}</p>}
       {importNotice && <p className="import-success" role="status">{importNotice}</p>}
 
-      {loading ? <div className="variables-loading" role="status"><LoaderCircle className="spin" size={18} /> Loading variables…</div> : variables.length === 0 ? <div className="variables-empty"><span><KeyRound size={21} /></span><h3>No variables in {activeEnvironment?.label ?? 'this environment'} yet</h3><p>Add a key and value to start building this environment's configuration.</p><button className="workspace-secondary" onClick={startCreate}><Plus size={15} /> Add the first variable</button></div> : <div className="variable-table-wrap"><table className="variable-table"><thead><tr><th>KEY</th><th>VALUE</th><th>CLASSIFICATION</th><th aria-label="Actions" /></tr></thead><tbody>{variables.map((variable) => {
+      {!loading && variables.length > 0 && <label className="variable-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search variables…" aria-label="Search variables" /></label>}
+      {loading ? <div className="variables-loading" role="status"><LoaderCircle className="spin" size={18} /> Loading variables…</div> : variables.length === 0 ? <div className="variables-empty"><span><KeyRound size={21} /></span><h3>No variables in {activeEnvironment?.label ?? 'this environment'} yet</h3><p>{canWriteVariables ? 'Add a key and value to start building this environment\'s configuration.' : 'There are no variables in this environment yet.'}</p>{canWriteVariables && <button className="workspace-secondary" onClick={startCreate}><Plus size={15} /> Add the first variable</button>}</div> : visibleVariables.length === 0 ? <div className="variables-empty"><h3>No matching variables</h3><p>Try another variable key.</p></div> : <div className="variable-table-wrap"><table className="variable-table"><thead><tr><th>KEY</th><th>VALUE</th><th>CLASSIFICATION</th><th aria-label="Actions" /></tr></thead><tbody>{visibleVariables.map((variable) => {
         const isRevealed = Object.prototype.hasOwnProperty.call(revealed, variable.id);
         return <tr key={variable.id}>
           <td><code>{variable.key}</code></td>
-          <td><div className="variable-value-cell"><span className={variable.sensitivity === 'sensitive' && !isRevealed ? 'masked-value' : 'variable-value'}>{isRevealed ? revealed[variable.id] : variable.value}</span>{variable.sensitivity === 'sensitive' && <button className="reveal-button" onClick={() => void toggleReveal(variable)} aria-label={isRevealed ? `Hide ${variable.key}` : `Reveal ${variable.key}`} title={isRevealed ? 'Hide value' : 'Reveal value'}>{isRevealed ? <EyeOff size={15} /> : <Eye size={15} />}</button>}</div></td>
+          <td><div className="variable-value-cell"><span className={variable.sensitivity === 'sensitive' && !isRevealed ? 'masked-value' : 'variable-value'}>{isRevealed ? revealed[variable.id] : variable.value}</span>{variable.sensitivity === 'sensitive' && canManageHistory && <button className="reveal-button" onClick={() => void toggleReveal(variable)} aria-label={isRevealed ? `Hide ${variable.key}` : `Reveal ${variable.key}`} title={isRevealed ? 'Hide value' : 'Reveal value'}>{isRevealed ? <EyeOff size={15} /> : <Eye size={15} />}</button>}</div></td>
           <td><span className={`classification-pill ${variable.sensitivity}`}>{variable.sensitivity === 'sensitive' ? <LockKeyhole size={12} /> : <ShieldCheck size={12} />}{variable.sensitivity === 'sensitive' ? 'Sensitive' : 'Standard'}</span></td>
-          <td><div className="variable-actions"><button onClick={() => void openHistory(variable)} aria-label={`History for ${variable.key}`} title="Version history"><History size={14} /></button><button onClick={() => startEdit(variable)} aria-label={`Edit ${variable.key}`} title="Edit"><Pencil size={14} /></button><button onClick={() => void deleteVariable(variable)} disabled={busy} aria-label={`Delete ${variable.key}`} title="Delete"><Trash2 size={14} /></button></div></td>
+          <td><div className="variable-actions"><button onClick={() => void openHistory(variable)} aria-label={`History for ${variable.key}`} title="Version history"><History size={14} /></button>{canWriteVariables && <><button onClick={() => startEdit(variable)} aria-label={`Edit ${variable.key}`} title="Edit"><Pencil size={14} /></button><button onClick={() => void deleteVariable(variable)} disabled={busy} aria-label={`Delete ${variable.key}`} title="Delete"><Trash2 size={14} /></button></>}</div></td>
         </tr>;
       })}</tbody></table></div>}
 
-      {historyVariable && <div className="modal-backdrop" role="presentation"><section className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="variable-history-title">
+      {historyVariable && <div className="modal-backdrop" role="presentation"><section ref={historyDialogRef} tabIndex={-1} className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="variable-history-title">
         <button className="modal-close" onClick={() => setHistoryVariable(null)} aria-label="Close version history">×</button>
         <span className="form-eyebrow">VARIABLE HISTORY</span><h2 id="variable-history-title">{historyVariable.key} versions</h2>
         <p className="modal-copy">Values are encrypted in storage. Sensitive content requires an authorized reveal.</p>
@@ -277,7 +308,7 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
         <div className="modal-actions"><button className="workspace-secondary" onClick={() => void compareHistory()} disabled={selectedVersionIds.length !== 2 || historyLoading || (selectedVersionIds.some((id) => historyVersions.find((item) => item.id === id)?.sensitivity === 'sensitive') && !canManageHistory)}><GitCompare size={15} /> Compare selected</button><button className="workspace-secondary" onClick={() => setHistoryVariable(null)}>Close</button></div>
         {historyComparison && <div className="import-preview"><h3>Comparison: v{historyComparison.left_version} → v{historyComparison.right_version}</h3>{historyComparison.sensitive ? <p>{historyComparison.different ? 'Sensitive values differ. Their contents are not shown.' : 'Sensitive values are identical. Their contents are not shown.'}</p> : <pre className="import-source">{historyComparison.diff?.join('\n') || 'No differences.'}</pre>}</div>}
       </section></div>}
-      {importOpen && <div className="modal-backdrop" role="presentation"><section className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="env-import-title"><button className="modal-close" onClick={() => setImportOpen(false)} aria-label="Close import">×</button><span className="form-eyebrow">BULK CONFIGURATION</span><h2 id="env-import-title">Import .env values</h2><p className="modal-copy">Preview changes for {activeEnvironment?.label ?? 'this environment'}. Nothing is saved until you confirm.</p><label className="import-label" htmlFor="env-import-content">Paste .env content</label><textarea id="env-import-content" className="import-source" rows={7} spellCheck={false} placeholder={'API_URL=https://example.com\nFEATURE_FLAG="enabled"'} value={importContent} onChange={(event) => { setImportContent(event.target.value); setImportPreview(null); setImportClassifications({}); }} />
+      {importOpen && <div className="modal-backdrop" role="presentation"><section ref={importDialogRef} tabIndex={-1} className="project-modal import-modal" role="dialog" aria-modal="true" aria-labelledby="env-import-title"><button className="modal-close" onClick={() => setImportOpen(false)} aria-label="Close import">×</button><span className="form-eyebrow">BULK CONFIGURATION</span><h2 id="env-import-title">Import .env values</h2><p className="modal-copy">Preview changes for {activeEnvironment?.label ?? 'this environment'}. Nothing is saved until you confirm.</p><label className="import-label" htmlFor="env-import-content">Paste .env content</label><textarea id="env-import-content" className="import-source" rows={7} spellCheck={false} placeholder={'API_URL=https://example.com\nFEATURE_FLAG="enabled"'} value={importContent} onChange={(event) => { setImportContent(event.target.value); setImportPreview(null); setImportClassifications({}); }} />
       {importOpen && encryptionStatus && <>
         {!encryptionStatus.standard_history_available && <p className="sensitivity-warning" role="status">{encryptionStatus.standard_history_reason === 'invalid_configuration' ? 'Standard variable history encryption is unavailable because the server key is invalid. Standard imports cannot be saved until it is corrected.' : 'Standard variable history encryption is not configured. Standard imports cannot be saved until it is configured.'}</p>}
         {!encryptionStatus.available && <p className="sensitivity-warning" role="status">{encryptionStatus.reason === 'invalid_configuration' ? 'Sensitive value encryption is unavailable because the server key is invalid. Sensitive imports cannot be saved.' : 'Sensitive value encryption is not configured. Sensitive imports cannot be saved.'}</p>}
@@ -287,7 +318,7 @@ export default function EnvironmentVariables({ projectId, canManageHistory, onAu
         <div className="modal-actions"><button className="workspace-secondary" type="button" onClick={() => setImportOpen(false)}>Cancel</button>{!importPreview ? <button className="workspace-primary" type="button" onClick={() => void previewImport()} disabled={busy || !importContent.trim()}>{busy ? 'Preparing…' : 'Preview import'}</button> : <button className="workspace-primary" type="button" onClick={() => void confirmImport()} disabled={busy || importPreview.invalid_lines.length > 0 || importPreview.preview.length === 0 || importPreview.preview.some((item) => item.classification === 'New' && !importClassifications[item.key])}>{busy ? 'Saving…' : 'Confirm and save'}</button>}</div>
       </section></div>}
 
-      {editor !== null && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditor(null); }}><section className="project-modal variable-modal" role="dialog" aria-modal="true" aria-labelledby="variable-editor-title"><button className="modal-close" onClick={() => setEditor(null)} aria-label="Close variable form">×</button><span className="form-eyebrow">{editing ? 'EDIT CONFIGURATION' : 'NEW CONFIGURATION'}</span><h2 id="variable-editor-title">{editing ? `Edit ${editing.key}` : 'Add a variable'}</h2><p className="modal-copy">This value belongs to {activeEnvironment?.label ?? 'the selected environment'}.</p><form className="project-form" onSubmit={saveVariable}>
+      {editor !== null && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditor(null); }}><section ref={editorDialogRef} tabIndex={-1} className="project-modal variable-modal" role="dialog" aria-modal="true" aria-labelledby="variable-editor-title"><button className="modal-close" onClick={() => setEditor(null)} aria-label="Close variable form">×</button><span className="form-eyebrow">{editing ? 'EDIT CONFIGURATION' : 'NEW CONFIGURATION'}</span><h2 id="variable-editor-title">{editing ? `Edit ${editing.key}` : 'Add a variable'}</h2><p className="modal-copy">This value belongs to {activeEnvironment?.label ?? 'the selected environment'}.</p><form className="project-form" onSubmit={saveVariable}>
         <label htmlFor="variable-key">Key</label><input id="variable-key" name="key" defaultValue={editing?.key ?? ''} maxLength={255} pattern="[A-Za-z_][A-Za-z0-9_]*" title="Use letters, numbers, and underscores; start with a letter or underscore." required autoFocus />
         {editing?.sensitivity === 'sensitive' && <label className="replace-sensitive-option"><input type="checkbox" checked={replaceSensitiveValue} onChange={(event) => setReplaceSensitiveValue(event.target.checked)} /> Replace the protected value</label>}
         <label htmlFor="variable-value">Value</label><textarea id="variable-value" name="value" rows={3} required={editor === 'new' || !editing || editing.sensitivity === 'standard' || replaceSensitiveValue} disabled={Boolean(editing?.sensitivity === 'sensitive' && !replaceSensitiveValue)} placeholder={editing?.sensitivity === 'sensitive' && !replaceSensitiveValue ? 'Protected value (unchanged)' : 'Enter the environment value'} defaultValue={editing?.sensitivity === 'standard' ? editing.value : ''} />

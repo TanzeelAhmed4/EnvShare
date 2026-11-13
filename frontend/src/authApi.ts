@@ -16,6 +16,13 @@ type Credentials = {
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api').replace(/\/$/, '');
 let sessionExpiredHandler: (() => void) | null = null;
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export function onSessionExpired(handler: () => void): () => void {
   sessionExpiredHandler = handler;
   return () => {
@@ -54,7 +61,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   }
   const payload: unknown = response.status === 204 ? null : await response.json().catch(() => null);
   if (isAuthSessionExpired(response.status, payload)) sessionExpiredHandler?.();
-  if (!response.ok) throw new Error(errorMessage(payload, response.status));
+  if (!response.ok) throw new ApiError(errorMessage(payload, response.status), response.status);
   return payload as T;
 }
 
